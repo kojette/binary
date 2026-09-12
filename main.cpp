@@ -38,7 +38,54 @@ unsigned char vol[VOLZ][VOLY][VOLX];
 unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 
 using namespace std;
+//영상 저장용
+ const char* SAVE_NAME = "베이스.bmp";  
+// 추가 : 렌더 결과(MyTexture)를 24비트 BMP로 저장.
+//        BMP는 아래->위, BGR 순서로 저장한다.
+//        WIDTH*3 이 4의 배수가 아닐 경우를 대비해 패딩을 넣는다.
+//--------------------------------------------------------------------
+void SaveBMP(const char* filename) {
+	int rowSize = WIDTH * 3;
+	int pad = (4 - (rowSize & 3)) & 3;   // 0~3
+	int dataSize = (rowSize + pad) * HEIGHT;
+	int fileSize = 54 + dataSize;
 
+	unsigned char header[54] = { 0 };
+	header[0] = 'B'; header[1] = 'M';
+	header[2] = fileSize; header[3] = fileSize >> 8;
+	header[4] = fileSize >> 16; header[5] = fileSize >> 24;
+	header[10] = 54;                       // 픽셀 데이터 시작 오프셋
+	header[14] = 40;                       // DIB 헤더 크기
+	header[18] = WIDTH; header[19] = WIDTH >> 8;
+	header[20] = WIDTH >> 16; header[21] = WIDTH >> 24;
+	header[22] = HEIGHT; header[23] = HEIGHT >> 8;
+	header[24] = HEIGHT >> 16; header[25] = HEIGHT >> 24;
+	header[26] = 1;                        // 플레인 수
+	header[28] = 24;                       // 픽셀당 비트
+	header[34] = dataSize; header[35] = dataSize >> 8;
+	header[36] = dataSize >> 16; header[37] = dataSize >> 24;
+
+	std::ofstream f(filename, std::ios::out | std::ios::binary);
+	if (!f.is_open()) {
+		std::cout << "save error : " << filename << std::endl;
+		return;
+	}
+	f.write((char*)header, 54);
+
+	unsigned char padding[3] = { 0, 0, 0 };
+	for (int y = 0; y < HEIGHT; y++) {     // MyTexture의 y=0이 아래줄
+		for (int x = 0; x < WIDTH; x++) {
+			unsigned char bgr[3];
+			bgr[0] = MyTexture[y][x][2];   // B
+			bgr[1] = MyTexture[y][x][1];   // G
+			bgr[2] = MyTexture[y][x][0];   // R
+			f.write((char*)bgr, 3);
+		}
+		f.write((char*)padding, pad);
+	}
+	f.close();
+	std::cout << "saved : " << filename << std::endl;
+}
 //가벼운 함수----------------------------------------------------------
 void FileRead()
 {
@@ -282,6 +329,7 @@ void MyDisplay() {
 	cout << glm::to_string(eye) << endl;
 
 	Render(eye);
+	SaveBMP(SAVE_NAME);//영상 저장용
 	glClear(GL_COLOR_BUFFER_BIT);
 	glBegin(GL_QUADS);
 	float fSize = 0.8f;
