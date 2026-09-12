@@ -38,8 +38,21 @@ unsigned char vol[VOLZ][VOLY][VOLX];
 unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 
 using namespace std;
+
+//---------- 공분산 전처리 (v3 추가) ----------
+const int R = 2;  // 이웃 반경. 5x5x5 정육면체
+
+struct CovData {
+	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // 누적합 (n으로 나누지 않음)
+	float Mx, My, Mz;                   // 무게중심용 좌표 합 (상대좌표)
+	float n;                            // 창 안의 1 개수
+};
+CovData covVol[VOLZ][VOLY][VOLX];
+//--------------------------------------------------
+
+
 //영상 저장용
- const char* SAVE_NAME = "베이스.bmp";  
+ const char* SAVE_NAME = "v3_메모리압축안함_정육면체2_상대좌표_정규화안함_전처리만_.bmp";  
 // 추가 : 렌더 결과(MyTexture)를 24비트 BMP로 저장.
 //        BMP는 아래->위, BGR 순서로 저장한다.
 //        WIDTH*3 이 4의 배수가 아닐 경우를 대비해 패딩을 넣는다.
@@ -313,6 +326,64 @@ void MyInit() {
 	printf("binarized (ISO = %d, inside : d >= ISO)\n", ISO);
 	//--------------------------------------------------------------------
 
+	auto preStart = std::chrono::high_resolution_clock::now();
+	//전처리 시작
+	long long boundaryCount = 0;
+
+	for (int z = 0; z < VOLZ; z++)
+		for (int y = 0; y < VOLY; y++)
+			for (int x = 0; x < VOLX; x++) {
+
+				covVol[z][y][x].n = 0.0f;  // 기본은 비어있음 표시
+
+				// --- 경계 판정: 6-이웃 중 자신과 다른 값이 하나라도 있으면 경계 (0쪽 1쪽 모두) ---
+				if (x == 0 || y == 0 || z == 0 ||
+					x == VOLX - 1 || y == VOLY - 1 || z == VOLZ - 1) continue;
+
+				unsigned char c = vol[z][y][x];
+				bool isBoundary =
+					(vol[z][y][x - 1] != c) || (vol[z][y][x + 1] != c) ||
+					(vol[z][y - 1][x] != c) || (vol[z][y + 1][x] != c) ||
+					(vol[z - 1][y][x] != c) || (vol[z + 1][y][x] != c);
+				if (!isBoundary) continue;
+
+				boundaryCount++;
+
+				// --- 5x5x5 창에서 값이 1인 복셀의 상대좌표를 누적 ---
+				float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
+				float Mx = 0, My = 0, Mz = 0;
+				float n = 0;
+
+				for (int dz = -R; dz <= R; dz++)
+					for (int dy = -R; dy <= R; dy++)
+						for (int dx = -R; dx <= R; dx++) {
+							int nx = x + dx, ny = y + dy, nz = z + dz;
+							if (nx < 0 || ny < 0 || nz < 0 ||
+								nx >= VOLX || ny >= VOLY || nz >= VOLZ) continue;
+							if (vol[nz][ny][nx] == 0) continue;
+
+							float fx = (float)dx, fy = (float)dy, fz = (float)dz;
+							Mx += fx;  My += fy;  Mz += fz;
+							Sxx += fx * fx;  Syy += fy * fy;  Szz += fz * fz;
+							Sxy += fx * fy;  Sxz += fx * fz;  Syz += fy * fz;
+							n += 1.0f;
+						}
+
+				covVol[z][y][x].Mx = Mx;   covVol[z][y][x].My = My;   covVol[z][y][x].Mz = Mz;
+				covVol[z][y][x].Sxx = Sxx; covVol[z][y][x].Syy = Syy; covVol[z][y][x].Szz = Szz;
+				covVol[z][y][x].Sxy = Sxy; covVol[z][y][x].Sxz = Sxz; covVol[z][y][x].Syz = Syz;
+				covVol[z][y][x].n = n;
+			}
+
+	auto preEnd = std::chrono::high_resolution_clock::now();
+	auto preDur = std::chrono::duration_cast<std::chrono::microseconds>(preEnd - preStart);
+	std::cout << "전처리(공분산) 시간: " << preDur.count() * 0.001f << " ms" << std::endl;
+	std::cout << "경계 복셀 수: " << boundaryCount << std::endl;
+
+
+
+
+
 	GenBlocks(); // 파일은 읽고 난 다음에.
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -329,7 +400,7 @@ void MyDisplay() {
 	cout << glm::to_string(eye) << endl;
 
 	Render(eye);
-	SaveBMP(SAVE_NAME);//영상 저장용
+	//SaveBMP(SAVE_NAME);//영상 저장용
 	glClear(GL_COLOR_BUFFER_BIT);
 	glBegin(GL_QUADS);
 	float fSize = 0.8f;
@@ -349,6 +420,6 @@ int main(int argc, char** argv) {
 	MyInit();
 	glutDisplayFunc(MyDisplay);
 	//glutIdleFunc(MyDisplay);
-	//glutMainLoop();
+	glutMainLoop();
 	return 0;
 }
