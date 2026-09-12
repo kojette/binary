@@ -46,9 +46,49 @@ struct CovData {
 	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // 누적합 (n으로 나누지 않음)
 	float Mx, My, Mz;                   // 무게중심용 좌표 합 (상대좌표)
 	float n;                            // 창 안의 1 개수
+	float Nx, Ny, Nz;   // v3-2 추가 : 정규화된 법선 (n<1이면 0벡터)
 };
 CovData covVol[VOLZ][VOLY][VOLX];
-//--------------------------------------------------
+
+//---------- 대칭 3x3 고유분해 : Jacobi 회전법 (v3-2 추가) ----------
+// A는 파괴됨. eval[i] 와 evec의 i번째 "열"이 짝.
+void Jacobi3(double A[3][3], double eval[3], double evec[3][3]) {
+	for (int i = 0; i < 3; i++)
+		for (int j = 0; j < 3; j++) evec[i][j] = (i == j) ? 1.0 : 0.0;
+
+	for (int sweep = 0; sweep < 20; sweep++) {
+		double off = fabs(A[0][1]) + fabs(A[0][2]) + fabs(A[1][2]);
+		if (off < 1e-12) break;
+
+		for (int p = 0; p < 2; p++)
+			for (int q = p + 1; q < 3; q++) {
+				if (fabs(A[p][q]) < 1e-15) continue;
+
+				// 비대각 원소 하나를 정확히 0으로 만드는 회전각
+				double theta = (A[q][q] - A[p][p]) / (2.0 * A[p][q]);
+				double t = (theta >= 0 ? 1.0 : -1.0) / (fabs(theta) + sqrt(theta * theta + 1.0));
+				double c = 1.0 / sqrt(t * t + 1.0);
+				double s = t * c;
+
+				for (int k = 0; k < 3; k++) {        // A * J
+					double akp = A[k][p], akq = A[k][q];
+					A[k][p] = c * akp - s * akq;
+					A[k][q] = s * akp + c * akq;
+				}
+				for (int k = 0; k < 3; k++) {        // J^T * A
+					double apk = A[p][k], aqk = A[q][k];
+					A[p][k] = c * apk - s * aqk;
+					A[q][k] = s * apk + c * aqk;
+				}
+				for (int k = 0; k < 3; k++) {        // V * J
+					double vkp = evec[k][p], vkq = evec[k][q];
+					evec[k][p] = c * vkp - s * vkq;
+					evec[k][q] = s * vkp + c * vkq;
+				}
+			}
+	}
+	eval[0] = A[0][0]; eval[1] = A[1][1]; eval[2] = A[2][2];
+}
 
 
 //영상 저장용
@@ -318,7 +358,7 @@ void MyInit() {
 	FileRead();
 
 
-	// 이진화 전처리. 반드시 GenBlocks() 보다 먼저 와야 한다.
+	// 이진화 전처리. 반드시 GenBlocks() 보다 먼저
 	for (int z = 0; z < VOLZ; z++)
 		for (int y = 0; y < VOLY; y++)
 			for (int x = 0; x < VOLX; x++)
@@ -326,8 +366,8 @@ void MyInit() {
 	printf("binarized (ISO = %d, inside : d >= ISO)\n", ISO);
 	//--------------------------------------------------------------------
 
-	auto preStart = std::chrono::high_resolution_clock::now();
-	//전처리 시작
+	auto preStart = std::chrono::high_resolution_clock::now();//측정용 시간
+	//---------------------------------------전처리 시작
 	long long boundaryCount = 0;
 
 	for (int z = 0; z < VOLZ; z++)
@@ -349,7 +389,7 @@ void MyInit() {
 
 				boundaryCount++;
 
-				// --- 5x5x5 창에서 값이 1인 복셀의 상대좌표를 누적 ---
+				// --- 5x5x5 창에서 값이 1인 복셀의 상대좌표!!를 누적 ---
 				float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
 				float Mx = 0, My = 0, Mz = 0;
 				float n = 0;
@@ -373,16 +413,65 @@ void MyInit() {
 				covVol[z][y][x].Sxx = Sxx; covVol[z][y][x].Syy = Syy; covVol[z][y][x].Szz = Szz;
 				covVol[z][y][x].Sxy = Sxy; covVol[z][y][x].Sxz = Sxz; covVol[z][y][x].Syz = Syz;
 				covVol[z][y][x].n = n;
+
+				//---------- v3-2 추가 : 공분산 복원 -> 고유분해 -> 법선 ----------
+				covVol[z][y][x].Nx = covVol[z][y][x].Ny = covVol[z][y][x].Nz = 0.0f;
+				if (n >= 1.0f) {
+					double inv = 1.0 / n;
+					// C = S/n - (M/n)(M/n)^T   : 평균을 뺀 진짜 공분산
+					double C[3][3];
+					C[0][0] = Sxx * inv - (Mx * inv) * (Mx * inv);
+					C[1][1] = Syy * inv - (My * inv) * (My * inv);
+					C[2][2] = Szz * inv - (Mz * inv) * (Mz * inv);
+					C[0][1] = C[1][0] = Sxy * inv - (Mx * inv) * (My * inv);
+					C[0][2] = C[2][0] = Sxz * inv - (Mx * inv) * (Mz * inv);
+					C[1][2] = C[2][1] = Syz * inv - (My * inv) * (Mz * inv);
+
+					double eval[3], evec[3][3];
+					Jacobi3(C, eval, evec);
+
+					// 가장 작은 고윳값의 고유벡터 = 법선
+					int k = 0;
+					if (eval[1] < eval[k]) k = 1;
+					if (eval[2] < eval[k]) k = 2;
+					double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
+
+					double len = sqrt(nx * nx + ny * ny + nz * nz);
+					if (len > 1e-12) {
+						nx /= len; ny /= len; nz /= len;
+						// 부호 : 무게중심의 반대쪽이 바깥
+						if (nx * (-Mx) + ny * (-My) + nz * (-Mz) < 0.0) { nx = -nx; ny = -ny; nz = -nz; }
+						covVol[z][y][x].Nx = (float)nx;
+						covVol[z][y][x].Ny = (float)ny;
+						covVol[z][y][x].Nz = (float)nz;
+					}
+				}
+				//--------------------------------------------------
 			}
+	//---------------------------------------전처리 끝
 
 	auto preEnd = std::chrono::high_resolution_clock::now();
 	auto preDur = std::chrono::duration_cast<std::chrono::microseconds>(preEnd - preStart);
 	std::cout << "전처리(공분산) 시간: " << preDur.count() * 0.001f << " ms" << std::endl;
 	std::cout << "경계 복셀 수: " << boundaryCount << std::endl;
 
-
-
-
+	// v3-2 : 눈으로 확인용. 경계 복셀 몇 개의 법선을 찍어본다.
+	{
+		int shown = 0;
+		for (int zz = 100; zz < VOLZ && shown < 5; zz++)
+			for (int yy = 0; yy < VOLY && shown < 5; yy++)
+				for (int xx = 0; xx < VOLX && shown < 5; xx++)
+					if (covVol[zz][yy][xx].n >= 50.0f) {
+						float mx = covVol[zz][yy][xx].Mx / covVol[zz][yy][xx].n;
+						float my = covVol[zz][yy][xx].My / covVol[zz][yy][xx].n;
+						float mz = covVol[zz][yy][xx].Mz / covVol[zz][yy][xx].n;
+						printf("(%3d,%3d,%3d) n=%3.0f vol=%d  N=(%.3f,%.3f,%.3f)  m=(%.3f,%.3f,%.3f) |m|=%.3f\n",
+							xx, yy, zz, covVol[zz][yy][xx].n, vol[zz][yy][xx],
+							covVol[zz][yy][xx].Nx, covVol[zz][yy][xx].Ny, covVol[zz][yy][xx].Nz,
+							mx, my, mz, sqrtf(mx * mx + my * my + mz * mz));
+						shown++;
+					}
+	}
 
 	GenBlocks(); // 파일은 읽고 난 다음에.
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
