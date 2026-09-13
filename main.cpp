@@ -38,16 +38,21 @@ unsigned char vol[VOLZ][VOLY][VOLX];
 unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
-
+//영상 저장용
+const char* SAVE_NAME = "step0.5_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(보간없음_최근접격자점N_바이섹션10_법선계산없음).bmp";
 //---------- 공분산 전처리 (v3 추가) ----------
 const int R = 2;  // 이웃 반경. 5x5x5 정육면체
-
-struct CovData {
-	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // 누적합 (n으로 나누지 않음)
-	float Mx, My, Mz;                   // 무게중심용 좌표 합 (상대좌표)
-	float n;                            // 창 안의 1 개수
+//
+//struct CovData {
+//	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // 누적합 (n으로 나누지 않음)
+//	float Mx, My, Mz;                   // 무게중심용 좌표 합 (상대좌표)
+//	float n;                            // 창 안의 1 개수
+//};
+//CovData covVol[VOLZ][VOLY][VOLX];
+struct NormalData {
+	float nx, ny, nz;   // 단위 법선. 경계가 아니거나 실패하면 (0,0,0)
 };
-CovData covVol[VOLZ][VOLY][VOLX];
+NormalData normVol[VOLZ][VOLY][VOLX];//최근접 법선용. 
 
 //---------- 대칭 3x3 고유분해 : Jacobi 회전법 (v3-2 추가) ----------
 // A는 파괴됨. eval[i] 와 evec의 i번째 "열"이 짝.
@@ -89,13 +94,6 @@ void Jacobi3(double A[3][3], double eval[3], double evec[3][3]) {
 	eval[0] = A[0][0]; eval[1] = A[1][1]; eval[2] = A[2][2];
 }
 
-
-//영상 저장용
-const char* SAVE_NAME = "step0.5_전처리(공분산저장_상대좌표_정육면체R2_메모리압축없음_정규화안함_누적합만저장_법선미계산)렌더링(바이섹션10_누적합보간_공분산복원_Jacobi고유분해_최소고윳값법선_부호는무게중심반대_교점은샘플점_법선계산은lighting내부).bmp";
-// 추가 : 렌더 결과(MyTexture)를 24비트 BMP로 저장.
-//        BMP는 아래->위, BGR 순서로 저장한다.
-//        WIDTH*3 이 4의 배수가 아닐 경우를 대비해 패딩을 넣는다.
-//--------------------------------------------------------------------
 void SaveBMP(const char* filename) {
 	int rowSize = WIDTH * 3;
 	int pad = (4 - (rowSize & 3)) & 3;   // 0~3
@@ -245,67 +243,78 @@ inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, f
 // 이진 볼륨 위에서는 중앙차분이 뭉텅뭉텅 꺾인 법선을 내놓는다. 그것이 출발점.
 glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
 	using namespace glm;
-	//---------- v4 : 누적합 보간 -> 공분산 복원 -> Jacobi -> 법선 ----------
-	int ix = int(p.x);
-	int iy = int(p.y);
-	int iz = int(p.z);
-	float wx = p.x - ix;
-	float wy = p.y - iy;
-	float wz = p.z - iz;
+	////---------- v4 : 누적합 보간 -> 공분산 복원 -> Jacobi -> 법선 ----------
+	//int ix = int(p.x);
+	//int iy = int(p.y);
+	//int iz = int(p.z);
+	//float wx = p.x - ix;
+	//float wy = p.y - iy;
+	//float wz = p.z - iz;
 
-	// 보간 결과를 담을 그릇. 0에서 시작해 8개 모서리를 더한다.
-	float sxx = 0, syy = 0, szz = 0, sxy = 0, sxz = 0, syz = 0;
-	float mx = 0, my = 0, mz = 0;
-	float nn = 0;
+	//// 보간 결과를 담을 그릇. 0에서 시작해 8개 모서리를 더한다.
+	//float sxx = 0, syy = 0, szz = 0, sxy = 0, sxz = 0, syz = 0;
+	//float mx = 0, my = 0, mz = 0;
+	//float nn = 0;
 
-	for (int dz = 0; dz < 2; dz++)
-		for (int dy = 0; dy < 2; dy++)
-			for (int dx = 0; dx < 2; dx++) {
-				float wgt = (dx ? wx : 1.0f - wx)
-					* (dy ? wy : 1.0f - wy)
-					* (dz ? wz : 1.0f - wz);
+	//for (int dz = 0; dz < 2; dz++)
+	//	for (int dy = 0; dy < 2; dy++)
+	//		for (int dx = 0; dx < 2; dx++) {
+	//			float wgt = (dx ? wx : 1.0f - wx)
+	//				* (dy ? wy : 1.0f - wy)
+	//				* (dz ? wz : 1.0f - wz);
 
-				const CovData& cd = covVol[iz + dz][iy + dy][ix + dx];
+	//			const CovData& cd = covVol[iz + dz][iy + dy][ix + dx];
 
-				sxx += wgt * cd.Sxx;  syy += wgt * cd.Syy;  szz += wgt * cd.Szz;
-				sxy += wgt * cd.Sxy;  sxz += wgt * cd.Sxz;  syz += wgt * cd.Syz;
-				mx += wgt * cd.Mx;  my += wgt * cd.My;  mz += wgt * cd.Mz;
-				nn += wgt * cd.n;
-			}
+	//			sxx += wgt * cd.Sxx;  syy += wgt * cd.Syy;  szz += wgt * cd.Szz;
+	//			sxy += wgt * cd.Sxy;  sxz += wgt * cd.Sxz;  syz += wgt * cd.Syz;
+	//			mx += wgt * cd.Mx;  my += wgt * cd.My;  mz += wgt * cd.Mz;
+	//			nn += wgt * cd.n;
+	//		}
 
-	vec3 N(0.0f);   // 8이웃이 전부 경계가 아니면 0벡터로 남는다
+	//vec3 N(0.0f);   // 8이웃이 전부 경계가 아니면 0벡터로 남는다
 
-	if (nn >= N_EPS) {
-		double inv = 1.0 / nn;
-		double C[3][3];
-		C[0][0] = sxx * inv - (mx * inv) * (mx * inv);
-		C[1][1] = syy * inv - (my * inv) * (my * inv);
-		C[2][2] = szz * inv - (mz * inv) * (mz * inv);
-		C[0][1] = C[1][0] = sxy * inv - (mx * inv) * (my * inv);
-		C[0][2] = C[2][0] = sxz * inv - (mx * inv) * (mz * inv);
-		C[1][2] = C[2][1] = syz * inv - (my * inv) * (mz * inv);
+	//if (nn >= N_EPS) {
+	//	double inv = 1.0 / nn;
+	//	double C[3][3];
+	//	C[0][0] = sxx * inv - (mx * inv) * (mx * inv);
+	//	C[1][1] = syy * inv - (my * inv) * (my * inv);
+	//	C[2][2] = szz * inv - (mz * inv) * (mz * inv);
+	//	C[0][1] = C[1][0] = sxy * inv - (mx * inv) * (my * inv);
+	//	C[0][2] = C[2][0] = sxz * inv - (mx * inv) * (mz * inv);
+	//	C[1][2] = C[2][1] = syz * inv - (my * inv) * (mz * inv);
 
-		double eval[3], evec[3][3];
-		Jacobi3(C, eval, evec);
+	//	double eval[3], evec[3][3];
+	//	Jacobi3(C, eval, evec);
 
-		// 가장 작은 고윳값의 고유벡터 = 법선
-		int k = 0;
-		if (eval[1] < eval[k]) k = 1;
-		if (eval[2] < eval[k]) k = 2;
-		double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
+	//	// 가장 작은 고윳값의 고유벡터 = 법선
+	//	int k = 0;
+	//	if (eval[1] < eval[k]) k = 1;
+	//	if (eval[2] < eval[k]) k = 2;
+	//	double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
 
-		double len = sqrt(nx * nx + ny * ny + nz * nz);
-		if (len > 1e-12) {
-			nx /= len; ny /= len; nz /= len;
-			// 부호 : 무게중심의 반대쪽이 바깥
-			if (nx * (-mx) + ny * (-my) + nz * (-mz) < 0.0) {
-				nx = -nx; ny = -ny; nz = -nz;
-			}
-			N = vec3((float)nx, (float)ny, (float)nz);
-		}
-	}
+	//	double len = sqrt(nx * nx + ny * ny + nz * nz);
+	//	if (len > 1e-12) {
+	//		nx /= len; ny /= len; nz /= len;
+	//		// 부호 : 무게중심의 반대쪽이 바깥
+	//		if (nx * (-mx) + ny * (-my) + nz * (-mz) < 0.0) {
+	//			nx = -nx; ny = -ny; nz = -nz;
+	//		}
+	//		N = vec3((float)nx, (float)ny, (float)nz);
+	//	}
+	//}
 	//---------- v4 끝 ----------
+	//---------- v6 : 보간 없음. 가장 가까운 격자점의 법선을 그대로 읽는다 ----------
+	int ix = int(p.x + 0.5f);   // 반올림
+	int iy = int(p.y + 0.5f);
+	int iz = int(p.z + 0.5f);
 
+	if (ix < 0) ix = 0;  if (ix > VOLX - 1) ix = VOLX - 1;
+	if (iy < 0) iy = 0;  if (iy > VOLY - 1) iy = VOLY - 1;
+	if (iz < 0) iz = 0;  if (iz > VOLZ - 1) iz = VOLZ - 1;
+
+	const NormalData& nd = normVol[iz][iy][ix];
+	vec3 N(nd.nx, nd.ny, nd.nz);
+	//---------- v6 끝 ----------
 
 	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
 	vec3 V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
@@ -428,7 +437,7 @@ void MyInit() {
 		for (int y = 0; y < VOLY; y++)
 			for (int x = 0; x < VOLX; x++) {
 
-				covVol[z][y][x].n = 0.0f;  // 기본은 비어있음 표시
+				//covVol[z][y][x].n = 0.0f;  // 기본은 비어있음 표시
 
 				// --- 경계 판정: 6-이웃 중 자신과 다른 값이 하나라도 있으면 경계 (0쪽 1쪽 모두) ---
 				if (x == 0 || y == 0 || z == 0 ||
@@ -462,10 +471,43 @@ void MyInit() {
 							n += 1.0f;
 						}
 
-				covVol[z][y][x].Mx = Mx;   covVol[z][y][x].My = My;   covVol[z][y][x].Mz = Mz;
+				/*covVol[z][y][x].Mx = Mx;   covVol[z][y][x].My = My;   covVol[z][y][x].Mz = Mz;
 				covVol[z][y][x].Sxx = Sxx; covVol[z][y][x].Syy = Syy; covVol[z][y][x].Szz = Szz;
 				covVol[z][y][x].Sxy = Sxy; covVol[z][y][x].Sxz = Sxz; covVol[z][y][x].Syz = Syz;
-				covVol[z][y][x].n = n;
+				covVol[z][y][x].n = n;*/
+				//---------- v6 : 여기서 바로 공분산 복원 -> Jacobi -> 법선 ----------
+				if (n < N_EPS) continue;   // 창이 비었으면 법선 없음 (0,0,0) 유지
+
+				double inv = 1.0 / n;
+				double C[3][3];
+				C[0][0] = Sxx * inv - (Mx * inv) * (Mx * inv);
+				C[1][1] = Syy * inv - (My * inv) * (My * inv);
+				C[2][2] = Szz * inv - (Mz * inv) * (Mz * inv);
+				C[0][1] = C[1][0] = Sxy * inv - (Mx * inv) * (My * inv);
+				C[0][2] = C[2][0] = Sxz * inv - (Mx * inv) * (Mz * inv);
+				C[1][2] = C[2][1] = Syz * inv - (My * inv) * (Mz * inv);
+
+				double eval[3], evec[3][3];
+				Jacobi3(C, eval, evec);
+
+				// 가장 작은 고윳값의 고유벡터 = 법선
+				int k = 0;
+				if (eval[1] < eval[k]) k = 1;
+				if (eval[2] < eval[k]) k = 2;
+				double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
+
+				double len = sqrt(nx * nx + ny * ny + nz * nz);
+				if (len < 1e-12) continue;   // 실패. (0,0,0) 유지
+				nx /= len; ny /= len; nz /= len;
+
+				// 부호 : 무게중심의 반대쪽이 바깥
+				if (nx * (-Mx) + ny * (-My) + nz * (-Mz) < 0.0) {
+					nx = -nx; ny = -ny; nz = -nz;
+				}
+
+				normVol[z][y][x].nx = (float)nx;
+				normVol[z][y][x].ny = (float)ny;
+				normVol[z][y][x].nz = (float)nz;
 			}
 	//---------------------------------------전처리 끝
 
