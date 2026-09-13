@@ -40,7 +40,7 @@ const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 
 //---------- 공분산 전처리 (v3 추가) ----------
-const int R = 4;  // 이웃 반경. 5x5x5 정육면체
+const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 
 struct CovData {
 	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // 누적합 (n으로 나누지 않음)
@@ -91,7 +91,7 @@ void Jacobi3(double A[3][3], double eval[3], double evec[3][3]) {
 
 
 //영상 저장용
-const char* SAVE_NAME = "전처리(공분산저장_상대좌표_정육면체R4_메모리압축없음_정규화안함_누적합만저장_법선미계산)렌더링(누적합보간_공분산복원_Jacobi고유분해_최소고윳값법선_부호는무게중심반대_교점은샘플점_법선계산은lighting내부).bmp";
+const char* SAVE_NAME = "전처리(공분산저장_상대좌표_정육면체R2_메모리압축없음_정규화안함_누적합만저장_법선미계산)렌더링(바이섹션0_누적합보간_공분산복원_Jacobi고유분해_최소고윳값법선_부호는무게중심반대_교점은샘플점_법선계산은lighting내부).bmp";
 // 추가 : 렌더 결과(MyTexture)를 24비트 BMP로 저장.
 //        BMP는 아래->위, BGR 순서로 저장한다.
 //        WIDTH*3 이 4의 배수가 아닐 경우를 대비해 패딩을 넣는다.
@@ -384,14 +384,13 @@ void Render(glm::vec3 eye) {
 				float phi = Phi(p);   // = GetDensity(p) - ISO_LEVEL
 
 				if (phiBefore * phi < 0.0f) { //부호 반전 검출
-					//------------------------------------------------
-					// 변경 : 바이섹션 미사용. 현재 샘플점을 교점으로 삼는다.
-					//------------------------------------------------
-					glm::vec3 hit = p;
+					//glm::vec3 hit = p;
+					glm::vec3 pBefore = RS + w * tBefore;//바이섹션 추가~
+					glm::vec3 hit = (phiBefore < 0.0f) ? Bisect(pBefore, p)
+						: Bisect(p, pBefore);
 
 					glm::vec3 rgb(0.9f, 0.85f, 0.8f);
 					col = lighting(hit, rgb, w);
-					//---------- v4 : 공분산 보간 법선 ----------
 					break;
 				}
 
@@ -450,6 +449,7 @@ void MyInit() {
 				for (int dz = -R; dz <= R; dz++)
 					for (int dy = -R; dy <= R; dy++)
 						for (int dx = -R; dx <= R; dx++) {
+							//if (dx * dx + dy * dy + dz * dz > R * R) continue;
 							int nx = x + dx, ny = y + dy, nz = z + dz;
 							if (nx < 0 || ny < 0 || nz < 0 ||
 								nx >= VOLX || ny >= VOLY || nz >= VOLZ) continue;
