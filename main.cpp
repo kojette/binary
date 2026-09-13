@@ -46,7 +46,6 @@ struct CovData {
 	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // 누적합 (n으로 나누지 않음)
 	float Mx, My, Mz;                   // 무게중심용 좌표 합 (상대좌표)
 	float n;                            // 창 안의 1 개수
-	float Nx, Ny, Nz;   // v3-2 추가 : 정규화된 법선 (n<1이면 0벡터)
 };
 CovData covVol[VOLZ][VOLY][VOLX];
 
@@ -167,7 +166,6 @@ void GenBlocks() { //수정A-2: 29, 32, 32에서 각각 B~_COUNT
 				// 저장한다.
 				bM[bz][by][bx] = max_value;
 			}
-	printf("max = %d \n", bM[14][16][16]);
 }
 
 inline bool isOutside(const glm::vec3& p) {//범위 처리 따라, 알파 컬러에서는 불필요
@@ -363,12 +361,10 @@ void MyInit() {
 		for (int y = 0; y < VOLY; y++)
 			for (int x = 0; x < VOLX; x++)
 				vol[z][y][x] = (vol[z][y][x] >= ISO);
-	printf("binarized (ISO = %d, inside : d >= ISO)\n", ISO);
 	//--------------------------------------------------------------------
 
 	auto preStart = std::chrono::high_resolution_clock::now();//측정용 시간
 	//---------------------------------------전처리 시작
-	long long boundaryCount = 0;
 
 	for (int z = 0; z < VOLZ; z++)
 		for (int y = 0; y < VOLY; y++)
@@ -386,8 +382,6 @@ void MyInit() {
 					(vol[z][y - 1][x] != c) || (vol[z][y + 1][x] != c) ||
 					(vol[z - 1][y][x] != c) || (vol[z + 1][y][x] != c);
 				if (!isBoundary) continue;
-
-				boundaryCount++;
 
 				// --- 5x5x5 창에서 값이 1인 복셀의 상대좌표!!를 누적 ---
 				float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
@@ -413,65 +407,12 @@ void MyInit() {
 				covVol[z][y][x].Sxx = Sxx; covVol[z][y][x].Syy = Syy; covVol[z][y][x].Szz = Szz;
 				covVol[z][y][x].Sxy = Sxy; covVol[z][y][x].Sxz = Sxz; covVol[z][y][x].Syz = Syz;
 				covVol[z][y][x].n = n;
-
-				//---------- v3-2 추가 : 공분산 복원 -> 고유분해 -> 법선 ----------
-				covVol[z][y][x].Nx = covVol[z][y][x].Ny = covVol[z][y][x].Nz = 0.0f;
-				if (n >= 1.0f) {
-					double inv = 1.0 / n;
-					// C = S/n - (M/n)(M/n)^T   : 평균을 뺀 진짜 공분산
-					double C[3][3];
-					C[0][0] = Sxx * inv - (Mx * inv) * (Mx * inv);
-					C[1][1] = Syy * inv - (My * inv) * (My * inv);
-					C[2][2] = Szz * inv - (Mz * inv) * (Mz * inv);
-					C[0][1] = C[1][0] = Sxy * inv - (Mx * inv) * (My * inv);
-					C[0][2] = C[2][0] = Sxz * inv - (Mx * inv) * (Mz * inv);
-					C[1][2] = C[2][1] = Syz * inv - (My * inv) * (Mz * inv);
-
-					double eval[3], evec[3][3];
-					Jacobi3(C, eval, evec);
-
-					// 가장 작은 고윳값의 고유벡터 = 법선
-					int k = 0;
-					if (eval[1] < eval[k]) k = 1;
-					if (eval[2] < eval[k]) k = 2;
-					double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
-
-					double len = sqrt(nx * nx + ny * ny + nz * nz);
-					if (len > 1e-12) {
-						nx /= len; ny /= len; nz /= len;
-						// 부호 : 무게중심의 반대쪽이 바깥
-						if (nx * (-Mx) + ny * (-My) + nz * (-Mz) < 0.0) { nx = -nx; ny = -ny; nz = -nz; }
-						covVol[z][y][x].Nx = (float)nx;
-						covVol[z][y][x].Ny = (float)ny;
-						covVol[z][y][x].Nz = (float)nz;
-					}
-				}
-				//--------------------------------------------------
 			}
 	//---------------------------------------전처리 끝
 
 	auto preEnd = std::chrono::high_resolution_clock::now();
 	auto preDur = std::chrono::duration_cast<std::chrono::microseconds>(preEnd - preStart);
 	std::cout << "전처리(공분산) 시간: " << preDur.count() * 0.001f << " ms" << std::endl;
-	std::cout << "경계 복셀 수: " << boundaryCount << std::endl;
-
-	// v3-2 : 눈으로 확인용. 경계 복셀 몇 개의 법선을 찍어본다.
-	{
-		int shown = 0;
-		for (int zz = 100; zz < VOLZ && shown < 5; zz++)
-			for (int yy = 0; yy < VOLY && shown < 5; yy++)
-				for (int xx = 0; xx < VOLX && shown < 5; xx++)
-					if (covVol[zz][yy][xx].n >= 50.0f) {
-						float mx = covVol[zz][yy][xx].Mx / covVol[zz][yy][xx].n;
-						float my = covVol[zz][yy][xx].My / covVol[zz][yy][xx].n;
-						float mz = covVol[zz][yy][xx].Mz / covVol[zz][yy][xx].n;
-						printf("(%3d,%3d,%3d) n=%3.0f vol=%d  N=(%.3f,%.3f,%.3f)  m=(%.3f,%.3f,%.3f) |m|=%.3f\n",
-							xx, yy, zz, covVol[zz][yy][xx].n, vol[zz][yy][xx],
-							covVol[zz][yy][xx].Nx, covVol[zz][yy][xx].Ny, covVol[zz][yy][xx].Nz,
-							mx, my, mz, sqrtf(mx * mx + my * my + mz * mz));
-						shown++;
-					}
-	}
 
 	GenBlocks(); // 파일은 읽고 난 다음에.
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
