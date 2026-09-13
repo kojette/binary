@@ -36,11 +36,11 @@ unsigned char vol[VOLZ][VOLY][VOLX];
 
 // 제거 : bm(블록 최소값). 이진에서는 "1이 하나라도 있나"만 보면 되므로
 unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
-
+const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 
 //---------- 공분산 전처리 (v3 추가) ----------
-const int R = 2;  // 이웃 반경. 5x5x5 정육면체
+const int R = 4;  // 이웃 반경. 5x5x5 정육면체
 
 struct CovData {
 	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // 누적합 (n으로 나누지 않음)
@@ -91,7 +91,7 @@ void Jacobi3(double A[3][3], double eval[3], double evec[3][3]) {
 
 
 //영상 저장용
- const char* SAVE_NAME = "v3_메모리압축안함_정육면체2_상대좌표_정규화안함_전처리만_.bmp";  
+const char* SAVE_NAME = "전처리(공분산저장_상대좌표_정육면체R4_메모리압축없음_정규화안함_누적합만저장_법선미계산)렌더링(누적합보간_공분산복원_Jacobi고유분해_최소고윳값법선_부호는무게중심반대_교점은샘플점_법선계산은lighting내부).bmp";
 // 추가 : 렌더 결과(MyTexture)를 24비트 BMP로 저장.
 //        BMP는 아래->위, BGR 순서로 저장한다.
 //        WIDTH*3 이 4의 배수가 아닐 경우를 대비해 패딩을 넣는다.
@@ -245,12 +245,70 @@ inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, f
 // 이진 볼륨 위에서는 중앙차분이 뭉텅뭉텅 꺾인 법선을 내놓는다. 그것이 출발점.
 glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
 	using namespace glm;
-	//중앙차분법 기울기(노말) 계산
-	float dx = (GetDensity(p + vec3(1, 0, 0)) - GetDensity(p - vec3(1, 0, 0))) * 0.5f;
-	float dy = (GetDensity(p + vec3(0, 1, 0)) - GetDensity(p - vec3(0, 1, 0))) * 0.5f;
-	float dz = (GetDensity(p + vec3(0, 0, 1)) - GetDensity(p - vec3(0, 0, 1))) * 0.5f;
+	//---------- v4 : 누적합 보간 -> 공분산 복원 -> Jacobi -> 법선 ----------
+	int ix = int(p.x);
+	int iy = int(p.y);
+	int iz = int(p.z);
+	float wx = p.x - ix;
+	float wy = p.y - iy;
+	float wz = p.z - iz;
 
-	vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
+	// 보간 결과를 담을 그릇. 0에서 시작해 8개 모서리를 더한다.
+	float sxx = 0, syy = 0, szz = 0, sxy = 0, sxz = 0, syz = 0;
+	float mx = 0, my = 0, mz = 0;
+	float nn = 0;
+
+	for (int dz = 0; dz < 2; dz++)
+		for (int dy = 0; dy < 2; dy++)
+			for (int dx = 0; dx < 2; dx++) {
+				float wgt = (dx ? wx : 1.0f - wx)
+					* (dy ? wy : 1.0f - wy)
+					* (dz ? wz : 1.0f - wz);
+
+				const CovData& cd = covVol[iz + dz][iy + dy][ix + dx];
+
+				sxx += wgt * cd.Sxx;  syy += wgt * cd.Syy;  szz += wgt * cd.Szz;
+				sxy += wgt * cd.Sxy;  sxz += wgt * cd.Sxz;  syz += wgt * cd.Syz;
+				mx += wgt * cd.Mx;  my += wgt * cd.My;  mz += wgt * cd.Mz;
+				nn += wgt * cd.n;
+			}
+
+	vec3 N(0.0f);   // 8이웃이 전부 경계가 아니면 0벡터로 남는다
+
+	if (nn >= N_EPS) {
+		double inv = 1.0 / nn;
+		double C[3][3];
+		C[0][0] = sxx * inv - (mx * inv) * (mx * inv);
+		C[1][1] = syy * inv - (my * inv) * (my * inv);
+		C[2][2] = szz * inv - (mz * inv) * (mz * inv);
+		C[0][1] = C[1][0] = sxy * inv - (mx * inv) * (my * inv);
+		C[0][2] = C[2][0] = sxz * inv - (mx * inv) * (mz * inv);
+		C[1][2] = C[2][1] = syz * inv - (my * inv) * (mz * inv);
+
+		double eval[3], evec[3][3];
+		Jacobi3(C, eval, evec);
+
+		// 가장 작은 고윳값의 고유벡터 = 법선
+		int k = 0;
+		if (eval[1] < eval[k]) k = 1;
+		if (eval[2] < eval[k]) k = 2;
+		double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
+
+		double len = sqrt(nx * nx + ny * ny + nz * nz);
+		if (len > 1e-12) {
+			nx /= len; ny /= len; nz /= len;
+			// 부호 : 무게중심의 반대쪽이 바깥
+			if (nx * (-mx) + ny * (-my) + nz * (-mz) < 0.0) {
+				nx = -nx; ny = -ny; nz = -nz;
+			}
+			N = vec3((float)nx, (float)ny, (float)nz);
+		}
+	}
+	//---------- v4 끝 ----------
+
+
+	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
+	vec3 V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
 	if (length(N) > 0.0f) N = normalize(N);
 
 	vec3 H = normalize(L + V);
@@ -333,6 +391,7 @@ void Render(glm::vec3 eye) {
 
 					glm::vec3 rgb(0.9f, 0.85f, 0.8f);
 					col = lighting(hit, rgb, w);
+					//---------- v4 : 공분산 보간 법선 ----------
 					break;
 				}
 
@@ -430,7 +489,7 @@ void MyDisplay() {
 	cout << glm::to_string(eye) << endl;
 
 	Render(eye);
-	//SaveBMP(SAVE_NAME);//영상 저장용
+	SaveBMP(SAVE_NAME);//영상 저장용
 	glClear(GL_COLOR_BUFFER_BIT);
 	glBegin(GL_QUADS);
 	float fSize = 0.8f;
