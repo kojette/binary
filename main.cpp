@@ -39,7 +39,7 @@ unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 //영상 저장용
-const char* SAVE_NAME = "step0.5_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(보간없음_최근접격자점N_바이섹션10_법선계산없음).bmp";
+const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(N삼선형보간_부호무처리_바이섹션10_법선계산없음).bmp";
 //---------- 공분산 전처리 (v3 추가) ----------
 const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //
@@ -207,10 +207,6 @@ inline float Phi(const glm::vec3& p) {
 	if (isOutside(p)) return 0.0f - ISO_LEVEL;
 	return GetDensity(p) - ISO_LEVEL;
 }
-
-//--------------------------------------------------------------------
-// 보류 : 바이섹션. 이번 버전에서는 호출하지 않는다.
-//--------------------------------------------------------------------
 glm::vec3 Bisect(glm::vec3 a, glm::vec3 b) {   // a는 바깥, b는 안쪽
 	for (int i = 0; i < 10; i++) {
 		glm::vec3 m = (a + b) * 0.5f;//중점!
@@ -303,18 +299,39 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 	//	}
 	//}
 	//---------- v4 끝 ----------
-	//---------- v6 : 보간 없음. 가장 가까운 격자점의 법선을 그대로 읽는다 ----------
-	int ix = int(p.x + 0.5f);   // 반올림
-	int iy = int(p.y + 0.5f);
-	int iz = int(p.z + 0.5f);
+	////---------- v6 : 보간 없음. 가장 가까운 격자점의 법선을 그대로 읽는다 ----------
+	//int ix = int(p.x + 0.5f);   // 반올림
+	//int iy = int(p.y + 0.5f);
+	//int iz = int(p.z + 0.5f);
 
-	if (ix < 0) ix = 0;  if (ix > VOLX - 1) ix = VOLX - 1;
-	if (iy < 0) iy = 0;  if (iy > VOLY - 1) iy = VOLY - 1;
-	if (iz < 0) iz = 0;  if (iz > VOLZ - 1) iz = VOLZ - 1;
+	//if (ix < 0) ix = 0;  if (ix > VOLX - 1) ix = VOLX - 1;
+	//if (iy < 0) iy = 0;  if (iy > VOLY - 1) iy = VOLY - 1;
+	//if (iz < 0) iz = 0;  if (iz > VOLZ - 1) iz = VOLZ - 1;
 
-	const NormalData& nd = normVol[iz][iy][ix];
-	vec3 N(nd.nx, nd.ny, nd.nz);
-	//---------- v6 끝 ----------
+	//const NormalData& nd = normVol[iz][iy][ix];
+	//vec3 N(nd.nx, nd.ny, nd.nz);
+	////---------- v6 끝 ----------
+	//---------- v7 : 8이웃 법선 삼선형 보간. 부호 처리 없음 ----------
+	int ix = int(p.x);          // 내림. 8이웃의 기준 모서리
+	int iy = int(p.y);
+	int iz = int(p.z);
+	float wx = p.x - ix;
+	float wy = p.y - iy;
+	float wz = p.z - iz;
+
+	vec3 N(0.0f);
+
+	for (int dz = 0; dz < 2; dz++)
+		for (int dy = 0; dy < 2; dy++)
+			for (int dx = 0; dx < 2; dx++) {
+				float wgt = (dx ? wx : 1.0f - wx)
+					* (dy ? wy : 1.0f - wy)
+					* (dz ? wz : 1.0f - wz);
+
+				const NormalData& nd = normVol[iz + dz][iy + dy][ix + dx];
+				N += wgt * vec3(nd.nx, nd.ny, nd.nz);
+			}
+	//---------- v7 끝 ----------
 
 	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
 	vec3 V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
