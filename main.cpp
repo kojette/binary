@@ -39,7 +39,7 @@ unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 //영상 저장용
-const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(N삼선형보간_부호무처리_바이섹션10_8이웃삼선형법선보간_NNT텐서보간).bmp";
+const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(N삼선형보간_부호무처리_바이섹션10_8이웃삼선형법선보간_부호장기준정렬).bmp";
 //---------- 공분산 전처리 (v3 추가) ----------
 const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //
@@ -239,7 +239,7 @@ inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, f
 // 이진 볼륨 위에서는 중앙차분이 뭉텅뭉텅 꺾인 법선을 내놓는다. 그것이 출발점.
 glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
 	using namespace glm;
-	//---------- v10 : 8이웃 NNᵀ 텐서 보간 -> 최대 고유벡터. 부호 없음 ----------
+	//---------- v11 : 8이웃 법선 삼선형 보간. 부호장 Φ 기울기 기준 정렬 ----------
 	int ix = int(p.x);
 	int iy = int(p.y);
 	int iz = int(p.z);
@@ -247,8 +247,13 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 	float wy = p.y - iy;
 	float wz = p.z - iz;
 
-	// 텐서 누적. 대칭이라 6개면 충분하지만, 알아보기 쉽게 3x3 그대로 쓴다.
-	double T[3][3] = { {0,0,0}, {0,0,0}, {0,0,0} };
+	// 기준 벡터 : 밀도가 줄어드는 쪽이 바깥. 중앙차분 기울기의 반대.
+	float gx = GetDensity(p + vec3(1, 0, 0)) - GetDensity(p - vec3(1, 0, 0));
+	float gy = GetDensity(p + vec3(0, 1, 0)) - GetDensity(p - vec3(0, 1, 0));
+	float gz = GetDensity(p + vec3(0, 0, 1)) - GetDensity(p - vec3(0, 0, 1));
+	vec3 Nref(-gx, -gy, -gz);
+
+	vec3 N(0.0f);
 
 	for (int dz = 0; dz < 2; dz++)
 		for (int dy = 0; dy < 2; dy++)
@@ -258,30 +263,13 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 					* (dz ? wz : 1.0f - wz);
 
 				const NormalData& nd = normVol[iz + dz][iy + dy][ix + dx];
-				double a[3] = { nd.nx, nd.ny, nd.nz };
+				vec3 Ni(nd.nx, nd.ny, nd.nz);
 
-				// T += wgt * (a aᵀ).  뒤집혀도 결과가 같다.
-				for (int i = 0; i < 3; i++)
-					for (int j = 0; j < 3; j++)
-						T[i][j] += wgt * a[i] * a[j];
+				if (dot(Ni, Nref) < 0.0f) Ni = -Ni;
+
+				N += wgt * Ni;
 			}
-
-	vec3 N(0.0f);
-
-	// 대각합이 0에 가까우면 8이웃이 전부 비었다는 뜻
-	if (T[0][0] + T[1][1] + T[2][2] > N_EPS) {
-		double eval[3], evec[3][3];
-		Jacobi3(T, eval, evec);   // T는 파괴된다
-
-		// 가장 "큰" 고윳값의 고유벡터 = 법선 (전처리와 반대이니 주의)
-		int k = 0;
-		if (eval[1] > eval[k]) k = 1;
-		if (eval[2] > eval[k]) k = 2;
-
-		N = vec3((float)evec[0][k], (float)evec[1][k], (float)evec[2][k]);
-	}
-	//---------- v10 끝 ----------
-
+	//---------- v11 끝 ----------
 
 	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
 	vec3 V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
