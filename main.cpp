@@ -39,7 +39,7 @@ unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 //영상 저장용
-const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(N삼선형보간_부호무처리_바이섹션10_8이웃삼선형법선보간_중심최근접기준부호정렬).bmp";
+const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_시선기준부호정렬).bmp";
 //---------- 공분산 전처리 (v3 추가) ----------
 const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //
@@ -239,7 +239,7 @@ inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, f
 // 이진 볼륨 위에서는 중앙차분이 뭉텅뭉텅 꺾인 법선을 내놓는다. 그것이 출발점.
 glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
 	using namespace glm;
-	//---------- v8 : 8이웃 법선 삼선형 보간. 중심(최근접) 기준 부호 정렬 ----------
+	//---------- v9 : 8이웃 법선 삼선형 보간. 시선기준정렬 ----------
 	int ix = int(p.x);          // 내림. 8이웃의 기준 모서리
 	int iy = int(p.y);
 	int iz = int(p.z);
@@ -248,12 +248,7 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 	float wz = p.z - iz;
 
 	// 기준 법선 : 8개 중 가장 가까운 격자점의 것. 반올림과 같다.
-	int rx = (wx < 0.5f) ? ix : ix + 1;
-	int ry = (wy < 0.5f) ? iy : iy + 1;
-	int rz = (wz < 0.5f) ? iz : iz + 1;
-	const NormalData& rf = normVol[rz][ry][rx];
-	vec3 Nref(rf.nx, rf.ny, rf.nz);
-
+	vec3 Nref = -w;
 	vec3 N(0.0f);
 
 	for (int dz = 0; dz < 2; dz++)
@@ -270,7 +265,8 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 
 				N += wgt * Ni;
 			}
-	//---------- v8 끝 ----------
+	//---------- v9 끝 ----------
+
 
 	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
 	vec3 V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
