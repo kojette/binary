@@ -39,7 +39,7 @@ unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 //영상 저장용
-const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(N삼선형보간_부호무처리_바이섹션10_법선계산없음).bmp";
+const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(N삼선형보간_부호무처리_바이섹션10_8이웃삼선형법선보간_중심최근접기준부호정렬).bmp";
 //---------- 공분산 전처리 (v3 추가) ----------
 const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //
@@ -239,85 +239,20 @@ inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, f
 // 이진 볼륨 위에서는 중앙차분이 뭉텅뭉텅 꺾인 법선을 내놓는다. 그것이 출발점.
 glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
 	using namespace glm;
-	////---------- v4 : 누적합 보간 -> 공분산 복원 -> Jacobi -> 법선 ----------
-	//int ix = int(p.x);
-	//int iy = int(p.y);
-	//int iz = int(p.z);
-	//float wx = p.x - ix;
-	//float wy = p.y - iy;
-	//float wz = p.z - iz;
-
-	//// 보간 결과를 담을 그릇. 0에서 시작해 8개 모서리를 더한다.
-	//float sxx = 0, syy = 0, szz = 0, sxy = 0, sxz = 0, syz = 0;
-	//float mx = 0, my = 0, mz = 0;
-	//float nn = 0;
-
-	//for (int dz = 0; dz < 2; dz++)
-	//	for (int dy = 0; dy < 2; dy++)
-	//		for (int dx = 0; dx < 2; dx++) {
-	//			float wgt = (dx ? wx : 1.0f - wx)
-	//				* (dy ? wy : 1.0f - wy)
-	//				* (dz ? wz : 1.0f - wz);
-
-	//			const CovData& cd = covVol[iz + dz][iy + dy][ix + dx];
-
-	//			sxx += wgt * cd.Sxx;  syy += wgt * cd.Syy;  szz += wgt * cd.Szz;
-	//			sxy += wgt * cd.Sxy;  sxz += wgt * cd.Sxz;  syz += wgt * cd.Syz;
-	//			mx += wgt * cd.Mx;  my += wgt * cd.My;  mz += wgt * cd.Mz;
-	//			nn += wgt * cd.n;
-	//		}
-
-	//vec3 N(0.0f);   // 8이웃이 전부 경계가 아니면 0벡터로 남는다
-
-	//if (nn >= N_EPS) {
-	//	double inv = 1.0 / nn;
-	//	double C[3][3];
-	//	C[0][0] = sxx * inv - (mx * inv) * (mx * inv);
-	//	C[1][1] = syy * inv - (my * inv) * (my * inv);
-	//	C[2][2] = szz * inv - (mz * inv) * (mz * inv);
-	//	C[0][1] = C[1][0] = sxy * inv - (mx * inv) * (my * inv);
-	//	C[0][2] = C[2][0] = sxz * inv - (mx * inv) * (mz * inv);
-	//	C[1][2] = C[2][1] = syz * inv - (my * inv) * (mz * inv);
-
-	//	double eval[3], evec[3][3];
-	//	Jacobi3(C, eval, evec);
-
-	//	// 가장 작은 고윳값의 고유벡터 = 법선
-	//	int k = 0;
-	//	if (eval[1] < eval[k]) k = 1;
-	//	if (eval[2] < eval[k]) k = 2;
-	//	double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
-
-	//	double len = sqrt(nx * nx + ny * ny + nz * nz);
-	//	if (len > 1e-12) {
-	//		nx /= len; ny /= len; nz /= len;
-	//		// 부호 : 무게중심의 반대쪽이 바깥
-	//		if (nx * (-mx) + ny * (-my) + nz * (-mz) < 0.0) {
-	//			nx = -nx; ny = -ny; nz = -nz;
-	//		}
-	//		N = vec3((float)nx, (float)ny, (float)nz);
-	//	}
-	//}
-	//---------- v4 끝 ----------
-	////---------- v6 : 보간 없음. 가장 가까운 격자점의 법선을 그대로 읽는다 ----------
-	//int ix = int(p.x + 0.5f);   // 반올림
-	//int iy = int(p.y + 0.5f);
-	//int iz = int(p.z + 0.5f);
-
-	//if (ix < 0) ix = 0;  if (ix > VOLX - 1) ix = VOLX - 1;
-	//if (iy < 0) iy = 0;  if (iy > VOLY - 1) iy = VOLY - 1;
-	//if (iz < 0) iz = 0;  if (iz > VOLZ - 1) iz = VOLZ - 1;
-
-	//const NormalData& nd = normVol[iz][iy][ix];
-	//vec3 N(nd.nx, nd.ny, nd.nz);
-	////---------- v6 끝 ----------
-	//---------- v7 : 8이웃 법선 삼선형 보간. 부호 처리 없음 ----------
+	//---------- v8 : 8이웃 법선 삼선형 보간. 중심(최근접) 기준 부호 정렬 ----------
 	int ix = int(p.x);          // 내림. 8이웃의 기준 모서리
 	int iy = int(p.y);
 	int iz = int(p.z);
 	float wx = p.x - ix;
 	float wy = p.y - iy;
 	float wz = p.z - iz;
+
+	// 기준 법선 : 8개 중 가장 가까운 격자점의 것. 반올림과 같다.
+	int rx = (wx < 0.5f) ? ix : ix + 1;
+	int ry = (wy < 0.5f) ? iy : iy + 1;
+	int rz = (wz < 0.5f) ? iz : iz + 1;
+	const NormalData& rf = normVol[rz][ry][rx];
+	vec3 Nref(rf.nx, rf.ny, rf.nz);
 
 	vec3 N(0.0f);
 
@@ -329,9 +264,13 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 					* (dz ? wz : 1.0f - wz);
 
 				const NormalData& nd = normVol[iz + dz][iy + dy][ix + dx];
-				N += wgt * vec3(nd.nx, nd.ny, nd.nz);
+				vec3 Ni(nd.nx, nd.ny, nd.nz);
+
+				if (dot(Ni, Nref) < 0.0f) Ni = -Ni;   // 기준과 반대편이면 뒤집는다
+
+				N += wgt * Ni;
 			}
-	//---------- v7 끝 ----------
+	//---------- v8 끝 ----------
 
 	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
 	vec3 V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
