@@ -1,4 +1,4 @@
-#include <GL/glut.h>
+ï»¿#include <GL/glut.h>
 #include <iostream>
 #include <fstream>
 #include <stdio.h>
@@ -8,7 +8,7 @@
 
 #include <vector>
 #include <algorithm>
-// ½Ã°£ ÃøÁ¤µî °í¼º´É ÇÔ¼ö
+// ì‹œê°„ ì¸¡ì •ë“± ê³ ì„±ëŠ¥ í•¨ìˆ˜
 #include <chrono> 
 
 #define WINDOW_WIDTH 800
@@ -24,7 +24,7 @@ const int BSHIFT = 3;
 const int ISO = 120; //iso
 const float ISO_LEVEL = 0.5f;
 
-//¼öÁ¤A-1: Àü¿ª ÆÄ¶ó¹ÌÅÍ·Î °ü¸®(BSIZE·Î ³ª´©µÇ, ³ª¸ÓÁö ÀÖÀ½ +1)
+//ìˆ˜ì •A-1: ì „ì—­ íŒŒë¼ë¯¸í„°ë¡œ ê´€ë¦¬(BSIZEë¡œ ë‚˜ëˆ„ë˜, ë‚˜ë¨¸ì§€ ìˆìŒ +1)
 const int BZ_COUNT = VOLZ / BSIZE + (VOLZ % BSIZE != 0); // 29
 const int BY_COUNT = VOLY / BSIZE + (VOLY % BSIZE != 0); // 32
 const int BX_COUNT = VOLX / BSIZE + (VOLX % BSIZE != 0); // 32
@@ -34,28 +34,28 @@ unsigned char MyTexture[HEIGHT][WIDTH][3];
 unsigned char vol[VOLZ][VOLY][VOLX];
 
 
-// Á¦°Å : bm(ºí·Ï ÃÖ¼Ò°ª). ÀÌÁø¿¡¼­´Â "1ÀÌ ÇÏ³ª¶óµµ ÀÖ³ª"¸¸ º¸¸é µÇ¹Ç·Î
+// ì œê±° : bm(ë¸”ë¡ ìµœì†Œê°’). ì´ì§„ì—ì„œëŠ” "1ì´ í•˜ë‚˜ë¼ë„ ìˆë‚˜"ë§Œ ë³´ë©´ ë˜ë¯€ë¡œ
 unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
-const float N_EPS = 1e-6f;   // nnÀÌ ÀÌº¸´Ù ÀÛÀ¸¸é ¹ı¼± ¾øÀ½
+const float N_EPS = 1e-6f;   // nnì´ ì´ë³´ë‹¤ ì‘ìœ¼ë©´ ë²•ì„  ì—†ìŒ
 using namespace std;
-//¿µ»ó ÀúÀå¿ë
-const char* SAVE_NAME = "step1.0_ÀüÃ³¸®(¹ı¼±ÀúÀå_»ó´ëÁÂÇ¥_Á¤À°¸éÃ¼R2_¸Ş¸ğ¸®¾ĞÃà¾øÀ½_ÀüÃ³¸®¿¡¼­Jacobi_ÃÖ¼Ò°íÀµ°ª¹ı¼±_ºÎÈ£´Â¹«°ÔÁß½É¹İ´ë)·»´õ¸µ(N»ï¼±Çüº¸°£_ºÎÈ£¹«Ã³¸®_¹ÙÀÌ¼½¼Ç10_8ÀÌ¿ô»ï¼±Çü¹ı¼±º¸°£_½Ã¼±±âÁØºÎÈ£Á¤·Ä+).bmp";
-//---------- °øºĞ»ê ÀüÃ³¸® (v3 Ãß°¡) ----------
-const int R = 2;  // ÀÌ¿ô ¹İ°æ. 5x5x5 Á¤À°¸éÃ¼
+//ì˜ìƒ ì €ì¥ìš©
+const char* SAVE_NAME = "step1.0_ì „ì²˜ë¦¬(ë²•ì„ ì €ì¥_ìƒëŒ€ì¢Œí‘œ_ì •ìœ¡ë©´ì²´R2_ë©”ëª¨ë¦¬ì••ì¶•ì—†ìŒ_ì „ì²˜ë¦¬ì—ì„œJacobi_ìµœì†Œê³ ìœ³ê°’ë²•ì„ _ë¶€í˜¸ëŠ”ë¬´ê²Œì¤‘ì‹¬ë°˜ëŒ€)ë Œë”ë§(Nì‚¼ì„ í˜•ë³´ê°„_ë¶€í˜¸ë¬´ì²˜ë¦¬_ë°”ì´ì„¹ì…˜10_8ì´ì›ƒì‚¼ì„ í˜•ë²•ì„ ë³´ê°„_NNTí…ì„œë³´ê°„).bmp";
+//---------- ê³µë¶„ì‚° ì „ì²˜ë¦¬ (v3 ì¶”ê°€) ----------
+const int R = 2;  // ì´ì›ƒ ë°˜ê²½. 5x5x5 ì •ìœ¡ë©´ì²´
 //
 //struct CovData {
-//	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // ´©ÀûÇÕ (nÀ¸·Î ³ª´©Áö ¾ÊÀ½)
-//	float Mx, My, Mz;                   // ¹«°ÔÁß½É¿ë ÁÂÇ¥ ÇÕ (»ó´ëÁÂÇ¥)
-//	float n;                            // Ã¢ ¾ÈÀÇ 1 °³¼ö
+//	float Sxx, Syy, Szz, Sxy, Sxz, Syz; // ëˆ„ì í•© (nìœ¼ë¡œ ë‚˜ëˆ„ì§€ ì•ŠìŒ)
+//	float Mx, My, Mz;                   // ë¬´ê²Œì¤‘ì‹¬ìš© ì¢Œí‘œ í•© (ìƒëŒ€ì¢Œí‘œ)
+//	float n;                            // ì°½ ì•ˆì˜ 1 ê°œìˆ˜
 //};
 //CovData covVol[VOLZ][VOLY][VOLX];
 struct NormalData {
-	float nx, ny, nz;   // ´ÜÀ§ ¹ı¼±. °æ°è°¡ ¾Æ´Ï°Å³ª ½ÇÆĞÇÏ¸é (0,0,0)
+	float nx, ny, nz;   // ë‹¨ìœ„ ë²•ì„ . ê²½ê³„ê°€ ì•„ë‹ˆê±°ë‚˜ ì‹¤íŒ¨í•˜ë©´ (0,0,0)
 };
-NormalData normVol[VOLZ][VOLY][VOLX];//ÃÖ±ÙÁ¢ ¹ı¼±¿ë. 
+NormalData normVol[VOLZ][VOLY][VOLX];//ìµœê·¼ì ‘ ë²•ì„ ìš©. 
 
-//---------- ´ëÄª 3x3 °íÀ¯ºĞÇØ : Jacobi È¸Àü¹ı (v3-2 Ãß°¡) ----------
-// A´Â ÆÄ±«µÊ. eval[i] ¿Í evecÀÇ i¹øÂ° "¿­"ÀÌ Â¦.
+//---------- ëŒ€ì¹­ 3x3 ê³ ìœ ë¶„í•´ : Jacobi íšŒì „ë²• (v3-2 ì¶”ê°€) ----------
+// AëŠ” íŒŒê´´ë¨. eval[i] ì™€ evecì˜ ië²ˆì§¸ "ì—´"ì´ ì§.
 void Jacobi3(double A[3][3], double eval[3], double evec[3][3]) {
 	for (int i = 0; i < 3; i++)
 		for (int j = 0; j < 3; j++) evec[i][j] = (i == j) ? 1.0 : 0.0;
@@ -68,7 +68,7 @@ void Jacobi3(double A[3][3], double eval[3], double evec[3][3]) {
 			for (int q = p + 1; q < 3; q++) {
 				if (fabs(A[p][q]) < 1e-15) continue;
 
-				// ºñ´ë°¢ ¿ø¼Ò ÇÏ³ª¸¦ Á¤È®È÷ 0À¸·Î ¸¸µå´Â È¸Àü°¢
+				// ë¹„ëŒ€ê° ì›ì†Œ í•˜ë‚˜ë¥¼ ì •í™•íˆ 0ìœ¼ë¡œ ë§Œë“œëŠ” íšŒì „ê°
 				double theta = (A[q][q] - A[p][p]) / (2.0 * A[p][q]);
 				double t = (theta >= 0 ? 1.0 : -1.0) / (fabs(theta) + sqrt(theta * theta + 1.0));
 				double c = 1.0 / sqrt(t * t + 1.0);
@@ -104,14 +104,14 @@ void SaveBMP(const char* filename) {
 	header[0] = 'B'; header[1] = 'M';
 	header[2] = fileSize; header[3] = fileSize >> 8;
 	header[4] = fileSize >> 16; header[5] = fileSize >> 24;
-	header[10] = 54;                       // ÇÈ¼¿ µ¥ÀÌÅÍ ½ÃÀÛ ¿ÀÇÁ¼Â
-	header[14] = 40;                       // DIB Çì´õ Å©±â
+	header[10] = 54;                       // í”½ì…€ ë°ì´í„° ì‹œì‘ ì˜¤í”„ì…‹
+	header[14] = 40;                       // DIB í—¤ë” í¬ê¸°
 	header[18] = WIDTH; header[19] = WIDTH >> 8;
 	header[20] = WIDTH >> 16; header[21] = WIDTH >> 24;
 	header[22] = HEIGHT; header[23] = HEIGHT >> 8;
 	header[24] = HEIGHT >> 16; header[25] = HEIGHT >> 24;
-	header[26] = 1;                        // ÇÃ·¹ÀÎ ¼ö
-	header[28] = 24;                       // ÇÈ¼¿´ç ºñÆ®
+	header[26] = 1;                        // í”Œë ˆì¸ ìˆ˜
+	header[28] = 24;                       // í”½ì…€ë‹¹ ë¹„íŠ¸
 	header[34] = dataSize; header[35] = dataSize >> 8;
 	header[36] = dataSize >> 16; header[37] = dataSize >> 24;
 
@@ -123,7 +123,7 @@ void SaveBMP(const char* filename) {
 	f.write((char*)header, 54);
 
 	unsigned char padding[3] = { 0, 0, 0 };
-	for (int y = 0; y < HEIGHT; y++) {     // MyTextureÀÇ y=0ÀÌ ¾Æ·¡ÁÙ
+	for (int y = 0; y < HEIGHT; y++) {     // MyTextureì˜ y=0ì´ ì•„ë˜ì¤„
 		for (int x = 0; x < WIDTH; x++) {
 			unsigned char bgr[3];
 			bgr[0] = MyTexture[y][x][2];   // B
@@ -136,7 +136,7 @@ void SaveBMP(const char* filename) {
 	f.close();
 	std::cout << "saved : " << filename << std::endl;
 }
-//°¡º­¿î ÇÔ¼ö----------------------------------------------------------
+//ê°€ë²¼ìš´ í•¨ìˆ˜----------------------------------------------------------
 void FileRead()
 {
 	std::ifstream myfile;
@@ -148,12 +148,12 @@ void FileRead()
 	myfile.close();
 }
 
-void GenBlocks() { //¼öÁ¤A-2: 29, 32, 32¿¡¼­ °¢°¢ B~_COUNT
+void GenBlocks() { //ìˆ˜ì •A-2: 29, 32, 32ì—ì„œ ê°ê° B~_COUNT
 	for (int bz = 0; bz < BZ_COUNT; bz++) // BZ = 28 
 		for (int by = 0; by < BY_COUNT; by++)
-			for (int bx = 0; bx < BX_COUNT; bx++) { // °¢ ºí·Ï¿¡ ´ëÇØ¼­
+			for (int bx = 0; bx < BX_COUNT; bx++) { // ê° ë¸”ë¡ì— ëŒ€í•´ì„œ
 				unsigned char max_value = 0;
-				// ÃÖ´ë°ªÀ» ÃßÃâÇØ¼­ //(°³¼±+; °æ°è°ª Ãß°¡)
+				// ìµœëŒ€ê°’ì„ ì¶”ì¶œí•´ì„œ //(ê°œì„ +; ê²½ê³„ê°’ ì¶”ê°€)
 				for (int z = bz * BSIZE; z <= __min(bz * BSIZE + BSIZE, VOLZ - 1); z++) { // 28*8 = for 224      z<232      vol[226]
 					for (int y = by * BSIZE; y <= __min(by * BSIZE + BSIZE, VOLY - 1); y++) {
 						for (int x = bx * BSIZE; x <= __min(bx * BSIZE + BSIZE, VOLX - 1); x++) { //bx=31, 31*8=248~256
@@ -161,26 +161,26 @@ void GenBlocks() { //¼öÁ¤A-2: 29, 32, 32¿¡¼­ °¢°¢ B~_COUNT
 						}
 					}
 				}
-				// ÀúÀåÇÑ´Ù.
+				// ì €ì¥í•œë‹¤.
 				bM[bz][by][bx] = max_value;
 			}
 }
 
-inline bool isOutside(const glm::vec3& p) {//¹üÀ§ Ã³¸® µû¶ó, ¾ËÆÄ ÄÃ·¯¿¡¼­´Â ºÒÇÊ¿ä
-	if (p.x >= VOLX - 1 || p.x < 0 ||//¿©±â -1·Î Ã³¸®ÇÔ
+inline bool isOutside(const glm::vec3& p) {//ë²”ìœ„ ì²˜ë¦¬ ë”°ë¼, ì•ŒíŒŒ ì»¬ëŸ¬ì—ì„œëŠ” ë¶ˆí•„ìš”
+	if (p.x >= VOLX - 1 || p.x < 0 ||//ì—¬ê¸° -1ë¡œ ì²˜ë¦¬í•¨
 		p.y >= VOLY - 1 || p.y < 0 ||
 		p.z >= VOLZ - 1 || p.z < 0) return true;
 	else
 		return false;
 }
 
-int inline GetBlockId(glm::vec3 p) {//(°³¼±+); ½ÃÇÁÆ® ¿¬»êÀÚ·Î ºí·Ï ¾ÆÀÌµğ °è»ê
+int inline GetBlockId(glm::vec3 p) {//(ê°œì„ +); ì‹œí”„íŠ¸ ì—°ì‚°ìë¡œ ë¸”ë¡ ì•„ì´ë”” ê³„ì‚°
 	int x = p.x, y = p.y, z = p.z;
 	int bx = x >> BSHIFT, by = y >> BSHIFT, bz = z >> BSHIFT;
-	return (bx << 10) | (by << 5) | bz; // ¼öÁ¤A-4: ½ÃÇÁÆ® º¹È£È­·Î(¾îÂ÷ÇÇ Áø¼öÇ¥Çö¸¸ »óÀÌ)
+	return (bx << 10) | (by << 5) | bz; // ìˆ˜ì •A-4: ì‹œí”„íŠ¸ ë³µí˜¸í™”ë¡œ(ì–´ì°¨í”¼ ì§„ìˆ˜í‘œí˜„ë§Œ ìƒì´)
 }
 
-//floatÈ­
+//floatí™”
 float GetDensity(glm::vec3 p) {
 	int ix = int(p.x); // 4.8 ->  4
 	int iy = int(p.y); // 4.8 ->  4
@@ -199,29 +199,29 @@ float GetDensity(glm::vec3 p) {
 	return den;
 }
 
-// ºÎÈ£Àå : ¾ÈÂÊÀÌ¸é ¾ç¼ö, ¹Ù±ùÀÌ¸é À½¼ö
+// ë¶€í˜¸ì¥ : ì•ˆìª½ì´ë©´ ì–‘ìˆ˜, ë°”ê¹¥ì´ë©´ ìŒìˆ˜
 //--------------------------------------------------------------------
-// º¯°æ : ÀÓ°è°ª ISO(120) -> ISO_LEVEL(0.5)
+// ë³€ê²½ : ì„ê³„ê°’ ISO(120) -> ISO_LEVEL(0.5)
 //--------------------------------------------------------------------
 inline float Phi(const glm::vec3& p) {
 	if (isOutside(p)) return 0.0f - ISO_LEVEL;
 	return GetDensity(p) - ISO_LEVEL;
 }
-glm::vec3 Bisect(glm::vec3 a, glm::vec3 b) {   // a´Â ¹Ù±ù, b´Â ¾ÈÂÊ
+glm::vec3 Bisect(glm::vec3 a, glm::vec3 b) {   // aëŠ” ë°”ê¹¥, bëŠ” ì•ˆìª½
 	for (int i = 0; i < 10; i++) {
-		glm::vec3 m = (a + b) * 0.5f;//ÁßÁ¡!
-		if (Phi(m) < 0.0f) a = m;   // mÀÌ ¹Ù±ùÀÌ¸é a¸¦ ±³Ã¼
-		else               b = m;   // mÀÌ ¾ÈÂÊÀÌ¸é b¸¦ ±³Ã¼
+		glm::vec3 m = (a + b) * 0.5f;//ì¤‘ì !
+		if (Phi(m) < 0.0f) a = m;   // mì´ ë°”ê¹¥ì´ë©´ aë¥¼ êµì²´
+		else               b = m;   // mì´ ì•ˆìª½ì´ë©´ bë¥¼ êµì²´
 	}
 	return (a + b) * 0.5f;
 }
 
-// ¼öÁ¤B-1: AABB ¹Ú½º Ã¼Å© ÇÔ¼ö ºĞ¸®~
+// ìˆ˜ì •B-1: AABB ë°•ìŠ¤ ì²´í¬ í•¨ìˆ˜ ë¶„ë¦¬~
 inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, float& tM) {
 	float t1, t2;
 
 	t1 = -RS.x / w.x;
-	t2 = ((VOLX - 1) - RS.x) / w.x; // ¼öÁ¤A-3: ÇÏµåÄÚµùÁ¦°Å(255-RS.x)->((VOLX-1)-RS.x)
+	t2 = ((VOLX - 1) - RS.x) / w.x; // ìˆ˜ì •A-3: í•˜ë“œì½”ë”©ì œê±°(255-RS.x)->((VOLX-1)-RS.x)
 	float xm = __min(t1, t2), xM = __max(t1, t2);
 	t1 = -RS.y / w.y;
 	t2 = ((VOLY - 1) - RS.y) / w.y;
@@ -232,24 +232,23 @@ inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, f
 	tm = __max(__max(xm, ym), zm);
 	tM = __min(__min(xM, yM), zM);
 
-	return tm < tM; // ±³Á¡ À¯È¿ÇÑ°Å ÀÖÀ¸¸é Âü ¸®ÅÏ
+	return tm < tM; // êµì  ìœ íš¨í•œê±° ìˆìœ¼ë©´ ì°¸ ë¦¬í„´
 }
 
-// ¼öÁ¤B-2: Á¶¸í ¿¬»ê ÇÔ¼ö·Î ºĞ¸®~
-// ÀÌÁø º¼·ı À§¿¡¼­´Â Áß¾ÓÂ÷ºĞÀÌ ¹¶ÅÖ¹¶ÅÖ ²ªÀÎ ¹ı¼±À» ³»³õ´Â´Ù. ±×°ÍÀÌ Ãâ¹ßÁ¡.
+// ìˆ˜ì •B-2: ì¡°ëª… ì—°ì‚° í•¨ìˆ˜ë¡œ ë¶„ë¦¬~
+// ì´ì§„ ë³¼ë¥¨ ìœ„ì—ì„œëŠ” ì¤‘ì•™ì°¨ë¶„ì´ ë­‰í……ë­‰í…… êº¾ì¸ ë²•ì„ ì„ ë‚´ë†“ëŠ”ë‹¤. ê·¸ê²ƒì´ ì¶œë°œì .
 glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
 	using namespace glm;
-	//---------- v9 : 8ÀÌ¿ô ¹ı¼± »ï¼±Çü º¸°£. ½Ã¼±±âÁØÁ¤·Ä ----------
-	int ix = int(p.x);          // ³»¸². 8ÀÌ¿ôÀÇ ±âÁØ ¸ğ¼­¸®
+	//---------- v10 : 8ì´ì›ƒ NNáµ€ í…ì„œ ë³´ê°„ -> ìµœëŒ€ ê³ ìœ ë²¡í„°. ë¶€í˜¸ ì—†ìŒ ----------
+	int ix = int(p.x);
 	int iy = int(p.y);
 	int iz = int(p.z);
 	float wx = p.x - ix;
 	float wy = p.y - iy;
 	float wz = p.z - iz;
 
-	// ±âÁØ ¹ı¼± : 8°³ Áß °¡Àå °¡±î¿î °İÀÚÁ¡ÀÇ °Í. ¹İ¿Ã¸²°ú °°´Ù.
-	vec3 Nref = -w;
-	vec3 N(0.0f);
+	// í…ì„œ ëˆ„ì . ëŒ€ì¹­ì´ë¼ 6ê°œë©´ ì¶©ë¶„í•˜ì§€ë§Œ, ì•Œì•„ë³´ê¸° ì‰½ê²Œ 3x3 ê·¸ëŒ€ë¡œ ì“´ë‹¤.
+	double T[3][3] = { {0,0,0}, {0,0,0}, {0,0,0} };
 
 	for (int dz = 0; dz < 2; dz++)
 		for (int dy = 0; dy < 2; dy++)
@@ -259,13 +258,29 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 					* (dz ? wz : 1.0f - wz);
 
 				const NormalData& nd = normVol[iz + dz][iy + dy][ix + dx];
-				vec3 Ni(nd.nx, nd.ny, nd.nz);
+				double a[3] = { nd.nx, nd.ny, nd.nz };
 
-				if (dot(Ni, Nref) < 0.0f) Ni = -Ni;   // ±âÁØ°ú ¹İ´ëÆíÀÌ¸é µÚÁı´Â´Ù
-
-				N += wgt * Ni;
+				// T += wgt * (a aáµ€).  ë’¤ì§‘í˜€ë„ ê²°ê³¼ê°€ ê°™ë‹¤.
+				for (int i = 0; i < 3; i++)
+					for (int j = 0; j < 3; j++)
+						T[i][j] += wgt * a[i] * a[j];
 			}
-	//---------- v9 ³¡ ----------
+
+	vec3 N(0.0f);
+
+	// ëŒ€ê°í•©ì´ 0ì— ê°€ê¹Œìš°ë©´ 8ì´ì›ƒì´ ì „ë¶€ ë¹„ì—ˆë‹¤ëŠ” ëœ»
+	if (T[0][0] + T[1][1] + T[2][2] > N_EPS) {
+		double eval[3], evec[3][3];
+		Jacobi3(T, eval, evec);   // TëŠ” íŒŒê´´ëœë‹¤
+
+		// ê°€ì¥ "í°" ê³ ìœ³ê°’ì˜ ê³ ìœ ë²¡í„° = ë²•ì„  (ì „ì²˜ë¦¬ì™€ ë°˜ëŒ€ì´ë‹ˆ ì£¼ì˜)
+		int k = 0;
+		if (eval[1] > eval[k]) k = 1;
+		if (eval[2] > eval[k]) k = 2;
+
+		N = vec3((float)evec[0][k], (float)evec[1][k], (float)evec[2][k]);
+	}
+	//---------- v10 ë ----------
 
 
 	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
@@ -277,10 +292,10 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 	float NL = fabs(dot(N, L));
 	float NH = fabs(dot(N, H));
 
-	float Ia = 0.25f, Id = 0.5f, Is = 0.9f;//»ìÂ¦ ¹à°Ô // ÇÕÀÌ 1ÀÎ°Ô ÁÁÀºµ¥ ¿©·¯ Ç¥Çö °¡´É
-	vec3 Ka = rgb * 0.8f; //ÁÖº¯±¤ ¹İ»çÀ² 0.8 °ö(¾îµÎ¿î ¹è°æ ¿¬Ãâ)
+	float Ia = 0.25f, Id = 0.5f, Is = 0.9f;//ì‚´ì§ ë°ê²Œ // í•©ì´ 1ì¸ê²Œ ì¢‹ì€ë° ì—¬ëŸ¬ í‘œí˜„ ê°€ëŠ¥
+	vec3 Ka = rgb * 0.8f; //ì£¼ë³€ê´‘ ë°˜ì‚¬ìœ¨ 0.8 ê³±(ì–´ë‘ìš´ ë°°ê²½ ì—°ì¶œ)
 	vec3 Kd = rgb;
-	vec3 Ks(1.2f, 0.8f, 0.8f); // ¿ÀÆÈ ´À³¦
+	vec3 Ks(1.2f, 0.8f, 0.8f); // ì˜¤íŒ” ëŠë‚Œ
 
 	vec3 I = Ia * Ka + Id * Kd * NL + Is * Ks * pow(NH, 30.0f);
 	return clamp(I, 0.0f, 1.0f);
@@ -298,43 +313,43 @@ void Render(glm::vec3 eye) {
 
 	auto start = std::chrono::high_resolution_clock::now();
 	const float supersampling = 0.5;
-	/////////////////·¹ÀÌÄ³½ºÆÃ
-	for (int y = 0; y < HEIGHT; y++) { // ¿µ»óÀÇ yÁÂÇ¥
-		for (int x = 0; x < WIDTH; x++) { // ¿µ»óÀÇ xÁÂÇ¥
+	/////////////////ë ˆì´ìºìŠ¤íŒ…
+	for (int y = 0; y < HEIGHT; y++) { // ì˜ìƒì˜ yì¢Œí‘œ
+		for (int x = 0; x < WIDTH; x++) { // ì˜ìƒì˜ xì¢Œí‘œ
 			glm::vec3 RS = eye + u * (x - WIDTH * 0.5f) * supersampling + v * (y - HEIGHT * 0.5f) * supersampling;
 
-			float tm, tM; // ¼öÁ¤B-1-(2): AABB ¹Ú½º Ã¼Å© ÇÔ¼ö ºĞ¸®~
-			if (!AABB_box_check(RS, w, tm, tM)) continue; // ¹Ú½º·Î ±¤¼± °¡´Â°Å ¾Æ´Ï¸é ÆĞ½º 
+			float tm, tM; // ìˆ˜ì •B-1-(2): AABB ë°•ìŠ¤ ì²´í¬ í•¨ìˆ˜ ë¶„ë¦¬~
+			if (!AABB_box_check(RS, w, tm, tM)) continue; // ë°•ìŠ¤ë¡œ ê´‘ì„  ê°€ëŠ”ê±° ì•„ë‹ˆë©´ íŒ¨ìŠ¤ 
 
 			glm::vec3 col(0.0f);
-			const float step = 0.5f; // "ÀÚÀß¼öÁ¤1": floatÀÇ °æ¿ì, f¸¦ Ãß°¡ÇØ¾ß À¯¸®
+			const float step = 0.5f; // "ìì˜ìˆ˜ì •1": floatì˜ ê²½ìš°, fë¥¼ ì¶”ê°€í•´ì•¼ ìœ ë¦¬
 
-			float tBefore = tm;//iso4; Á÷Àü »ùÇÃÀÓÀ» º¸ÀåÇÏ±â À§ÇÑ
+			float tBefore = tm;//iso4; ì§ì „ ìƒ˜í”Œì„ì„ ë³´ì¥í•˜ê¸° ìœ„í•œ
 			float phiBefore = Phi(RS + w * tm);
-			for (float t = tm; t < tM; t = t + step) { // ±¤¼±À» ÁøÇàÇÏÀÚ
+			for (float t = tm; t < tM; t = t + step) { // ê´‘ì„ ì„ ì§„í–‰í•˜ì
 				glm::vec3 p = RS + w * t;
 				if (isOutside(p))
 					continue;
 
-				// ³»(p)°¡ ¼ÓÇÑ ºí·ÏÀÇ max ¾È´Ù°í °¡Á¤.
+				// ë‚´(p)ê°€ ì†í•œ ë¸”ë¡ì˜ max ì•ˆë‹¤ê³  ê°€ì •.
 				int bid = GetBlockId(p); // 123456
 
-				// ¼öÁ¤A-5: ºñÆ®¿¬»êÀÚ È°¿ëÇØ º½. 
-				int bz = bid & 0x1F; //1F(16+15)ÀÓ Áï, 11111ÀÌ°í &¿¬»êÇÔ.              
-				int by = (bid >> 5) & 0x1F; // 5°³ Áö¿ì°í ³²Àº ¿À¸¥ÂÊ 5°³ ÃßÃâ
-				int bx = (bid >> 10) & 0x1F; // ÀÌÇÏ µ¿ÀÏ
+				// ìˆ˜ì •A-5: ë¹„íŠ¸ì—°ì‚°ì í™œìš©í•´ ë´„. 
+				int bz = bid & 0x1F; //1F(16+15)ì„ ì¦‰, 11111ì´ê³  &ì—°ì‚°í•¨.              
+				int by = (bid >> 5) & 0x1F; // 5ê°œ ì§€ìš°ê³  ë‚¨ì€ ì˜¤ë¥¸ìª½ 5ê°œ ì¶”ì¶œ
+				int bx = (bid >> 10) & 0x1F; // ì´í•˜ ë™ì¼
 
 				//--------------------------------------------------------
-				// º¯°æ : bM < ISO -> bM == 0
-				//        vol ÀÌ 0/1 ÀÌ¹Ç·Î ºí·Ï ÃÖ´ë°ªÀÌ 0ÀÌ¸é ÅëÂ°·Î ºó ºí·Ï.
+				// ë³€ê²½ : bM < ISO -> bM == 0
+				//        vol ì´ 0/1 ì´ë¯€ë¡œ ë¸”ë¡ ìµœëŒ€ê°’ì´ 0ì´ë©´ í†µì§¸ë¡œ ë¹ˆ ë¸”ë¡.
 				//--------------------------------------------------------
 				if (bM[bz][by][bx] == 0) {
 					float jump = 0;
 					int nextBid;
-					// ºó ºí·ÏÀÌ´Ï±î, ¿¬»êÀ» °Ç³Ê¶ÙÀÚ. ±¤¼±À» ºü¸£°Ô ÀüÁøÇÏÀÚ.
+					// ë¹ˆ ë¸”ë¡ì´ë‹ˆê¹Œ, ì—°ì‚°ì„ ê±´ë„ˆë›°ì. ê´‘ì„ ì„ ë¹ ë¥´ê²Œ ì „ì§„í•˜ì.
 					do {
 						jump += 1.0f;
-						nextBid = GetBlockId(p + w * jump); // Ãß°¡ ÀüÁø
+						nextBid = GetBlockId(p + w * jump); // ì¶”ê°€ ì „ì§„
 					} while (bid == nextBid);
 					t = t + (jump - step);
 					tBefore = t;//iso4
@@ -344,9 +359,9 @@ void Render(glm::vec3 eye) {
 
 				float phi = Phi(p);   // = GetDensity(p) - ISO_LEVEL
 
-				if (phiBefore * phi < 0.0f) { //ºÎÈ£ ¹İÀü °ËÃâ
+				if (phiBefore * phi < 0.0f) { //ë¶€í˜¸ ë°˜ì „ ê²€ì¶œ
 					//glm::vec3 hit = p;
-					glm::vec3 pBefore = RS + w * tBefore;//¹ÙÀÌ¼½¼Ç Ãß°¡~
+					glm::vec3 pBefore = RS + w * tBefore;//ë°”ì´ì„¹ì…˜ ì¶”ê°€~
 					glm::vec3 hit = (phiBefore < 0.0f) ? Bisect(pBefore, p)
 						: Bisect(p, pBefore);
 
@@ -365,7 +380,7 @@ void Render(glm::vec3 eye) {
 	}
 	auto end = std::chrono::high_resolution_clock::now();
 	auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-	std::cout << "½ÇÇà ½Ã°£: " << duration.count() * 0.001f << " ms" << std::endl;
+	std::cout << "ì‹¤í–‰ ì‹œê°„: " << duration.count() * 0.001f << " ms" << std::endl;
 	glTexImage2D(GL_TEXTURE_2D, 0, 3, WIDTH, HEIGHT, 0, GL_RGB,
 		GL_UNSIGNED_BYTE, &MyTexture[0][0][0]);
 }
@@ -375,23 +390,23 @@ void MyInit() {
 	FileRead();
 
 
-	// ÀÌÁøÈ­ ÀüÃ³¸®. ¹İµå½Ã GenBlocks() º¸´Ù ¸ÕÀú
+	// ì´ì§„í™” ì „ì²˜ë¦¬. ë°˜ë“œì‹œ GenBlocks() ë³´ë‹¤ ë¨¼ì €
 	for (int z = 0; z < VOLZ; z++)
 		for (int y = 0; y < VOLY; y++)
 			for (int x = 0; x < VOLX; x++)
 				vol[z][y][x] = (vol[z][y][x] >= ISO);
 	//--------------------------------------------------------------------
 
-	auto preStart = std::chrono::high_resolution_clock::now();//ÃøÁ¤¿ë ½Ã°£
-	//---------------------------------------ÀüÃ³¸® ½ÃÀÛ
+	auto preStart = std::chrono::high_resolution_clock::now();//ì¸¡ì •ìš© ì‹œê°„
+	//---------------------------------------ì „ì²˜ë¦¬ ì‹œì‘
 
 	for (int z = 0; z < VOLZ; z++)
 		for (int y = 0; y < VOLY; y++)
 			for (int x = 0; x < VOLX; x++) {
 
-				//covVol[z][y][x].n = 0.0f;  // ±âº»Àº ºñ¾îÀÖÀ½ Ç¥½Ã
+				//covVol[z][y][x].n = 0.0f;  // ê¸°ë³¸ì€ ë¹„ì–´ìˆìŒ í‘œì‹œ
 
-				// --- °æ°è ÆÇÁ¤: 6-ÀÌ¿ô Áß ÀÚ½Å°ú ´Ù¸¥ °ªÀÌ ÇÏ³ª¶óµµ ÀÖÀ¸¸é °æ°è (0ÂÊ 1ÂÊ ¸ğµÎ) ---
+				// --- ê²½ê³„ íŒì •: 6-ì´ì›ƒ ì¤‘ ìì‹ ê³¼ ë‹¤ë¥¸ ê°’ì´ í•˜ë‚˜ë¼ë„ ìˆìœ¼ë©´ ê²½ê³„ (0ìª½ 1ìª½ ëª¨ë‘) ---
 				if (x == 0 || y == 0 || z == 0 ||
 					x == VOLX - 1 || y == VOLY - 1 || z == VOLZ - 1) continue;
 
@@ -402,7 +417,7 @@ void MyInit() {
 					(vol[z - 1][y][x] != c) || (vol[z + 1][y][x] != c);
 				if (!isBoundary) continue;
 
-				// --- 5x5x5 Ã¢¿¡¼­ °ªÀÌ 1ÀÎ º¹¼¿ÀÇ »ó´ëÁÂÇ¥!!¸¦ ´©Àû ---
+				// --- 5x5x5 ì°½ì—ì„œ ê°’ì´ 1ì¸ ë³µì…€ì˜ ìƒëŒ€ì¢Œí‘œ!!ë¥¼ ëˆ„ì  ---
 				float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
 				float Mx = 0, My = 0, Mz = 0;
 				float n = 0;
@@ -427,8 +442,8 @@ void MyInit() {
 				covVol[z][y][x].Sxx = Sxx; covVol[z][y][x].Syy = Syy; covVol[z][y][x].Szz = Szz;
 				covVol[z][y][x].Sxy = Sxy; covVol[z][y][x].Sxz = Sxz; covVol[z][y][x].Syz = Syz;
 				covVol[z][y][x].n = n;*/
-				//---------- v6 : ¿©±â¼­ ¹Ù·Î °øºĞ»ê º¹¿ø -> Jacobi -> ¹ı¼± ----------
-				if (n < N_EPS) continue;   // Ã¢ÀÌ ºñ¾úÀ¸¸é ¹ı¼± ¾øÀ½ (0,0,0) À¯Áö
+				//---------- v6 : ì—¬ê¸°ì„œ ë°”ë¡œ ê³µë¶„ì‚° ë³µì› -> Jacobi -> ë²•ì„  ----------
+				if (n < N_EPS) continue;   // ì°½ì´ ë¹„ì—ˆìœ¼ë©´ ë²•ì„  ì—†ìŒ (0,0,0) ìœ ì§€
 
 				double inv = 1.0 / n;
 				double C[3][3];
@@ -442,17 +457,17 @@ void MyInit() {
 				double eval[3], evec[3][3];
 				Jacobi3(C, eval, evec);
 
-				// °¡Àå ÀÛÀº °íÀµ°ªÀÇ °íÀ¯º¤ÅÍ = ¹ı¼±
+				// ê°€ì¥ ì‘ì€ ê³ ìœ³ê°’ì˜ ê³ ìœ ë²¡í„° = ë²•ì„ 
 				int k = 0;
 				if (eval[1] < eval[k]) k = 1;
 				if (eval[2] < eval[k]) k = 2;
 				double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
 
 				double len = sqrt(nx * nx + ny * ny + nz * nz);
-				if (len < 1e-12) continue;   // ½ÇÆĞ. (0,0,0) À¯Áö
+				if (len < 1e-12) continue;   // ì‹¤íŒ¨. (0,0,0) ìœ ì§€
 				nx /= len; ny /= len; nz /= len;
 
-				// ºÎÈ£ : ¹«°ÔÁß½ÉÀÇ ¹İ´ëÂÊÀÌ ¹Ù±ù
+				// ë¶€í˜¸ : ë¬´ê²Œì¤‘ì‹¬ì˜ ë°˜ëŒ€ìª½ì´ ë°”ê¹¥
 				if (nx * (-Mx) + ny * (-My) + nz * (-Mz) < 0.0) {
 					nx = -nx; ny = -ny; nz = -nz;
 				}
@@ -461,13 +476,13 @@ void MyInit() {
 				normVol[z][y][x].ny = (float)ny;
 				normVol[z][y][x].nz = (float)nz;
 			}
-	//---------------------------------------ÀüÃ³¸® ³¡
+	//---------------------------------------ì „ì²˜ë¦¬ ë
 
 	auto preEnd = std::chrono::high_resolution_clock::now();
 	auto preDur = std::chrono::duration_cast<std::chrono::microseconds>(preEnd - preStart);
-	std::cout << "ÀüÃ³¸®(°øºĞ»ê) ½Ã°£: " << preDur.count() * 0.001f << " ms" << std::endl;
+	std::cout << "ì „ì²˜ë¦¬(ê³µë¶„ì‚°) ì‹œê°„: " << preDur.count() * 0.001f << " ms" << std::endl;
 
-	GenBlocks(); // ÆÄÀÏÀº ÀĞ°í ³­ ´ÙÀ½¿¡.
+	GenBlocks(); // íŒŒì¼ì€ ì½ê³  ë‚œ ë‹¤ìŒì—.
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
@@ -475,15 +490,15 @@ void MyInit() {
 }
 
 void MyDisplay() {
-	////////////////Ä«¸Ş¶ó ¼¼ÆÃ
+	////////////////ì¹´ë©”ë¼ ì„¸íŒ…
 	static float t = 0;
 	t += 1.0;
-	glm::vec3 eye(0, 0, 100);   // ºñ±³¸¦ À§ÇØ °íÁ¤iso
+	glm::vec3 eye(0, 0, 100);   // ë¹„êµë¥¼ ìœ„í•´ ê³ ì •iso
 	//glm::vec3 eye(sin(t * 0.1) * 50, 0, 100);
 	cout << glm::to_string(eye) << endl;
 
 	Render(eye);
-	SaveBMP(SAVE_NAME);//¿µ»ó ÀúÀå¿ë
+	SaveBMP(SAVE_NAME);//ì˜ìƒ ì €ì¥ìš©
 	glClear(GL_COLOR_BUFFER_BIT);
 	glBegin(GL_QUADS);
 	float fSize = 0.8f;
@@ -496,7 +511,7 @@ void MyDisplay() {
 }
 
 int main(int argc, char** argv) {
-	glutInit(&argc, argv); //GLUT À©µµ¿ì ÇÔ¼ö
+	glutInit(&argc, argv); //GLUT ìœˆë„ìš° í•¨ìˆ˜
 	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
 	glutInitWindowSize(WINDOW_WIDTH, WINDOW_HEIGHT);
 	glutCreateWindow("OpenGL Drawing Example");
