@@ -39,7 +39,7 @@ unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 //영상 저장용
-const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_시선기준부호정렬).bmp";
+const char* SAVE_NAME = "step1.0_전처리(법선저장_상대좌표_정육면체R2_메모리압축없음_전처리에서Jacobi_최소고윳값법선_부호는무게중심반대)렌더링(N삼선형보간_부호무처리_바이섹션10_8이웃삼선형법선보간_시선기준부호정렬+).bmp";
 //---------- 공분산 전처리 (v3 추가) ----------
 const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //
