@@ -39,7 +39,7 @@ unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 //영상 저장용
-const char* SAVE_NAME = "step1.0_전처리(저장없음_이진화만)렌더링(실시간_교점중심정육면체R2_실수상대좌표_Jacobi_최소고윳값법선_부호는무게중심반대_보간없음_바이섹션10회_법선계산은lighting내부).bmp";
+const char* SAVE_NAME = "v13_step1.0_전처리(공분산6개저장_상대좌표_정육면체R2_n으로나눔_무게중심버림_법선미계산)렌더링(공분산6개삼선형보간_픽셀마다Jacobi_최소고윳값법선_부호무처리_조명fabs의존_바이섹션10회_법선계산은lighting내부).bmp";
 //---------- 공분산 전처리 (v3 추가) ----------
 const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //
@@ -49,10 +49,16 @@ const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //	float n;                            // 창 안의 1 개수
 //};
 //CovData covVol[VOLZ][VOLY][VOLX];
-struct NormalData {
-	float nx, ny, nz;   // 단위 법선. 경계가 아니거나 실패하면 (0,0,0)
-};
+//struct NormalData {
+//	float nx, ny, nz;   // 단위 법선. 경계가 아니거나 실패하면 (0,0,0)
+//};
 //NormalData normVol[VOLZ][VOLY][VOLX];//최근접 법선용.  v12는 실시간이라 저장 안해용. 
+
+// v13 : 공분산 6개만 저장. M과 n은 버린다 (24바이트)
+struct CovData6 {
+	float Cxx, Cyy, Czz, Cxy, Cxz, Cyz;
+};
+CovData6 covVol[VOLZ][VOLY][VOLX];
 
 //---------- 대칭 3x3 고유분해 : Jacobi 회전법 (v3-2 추가) ----------
 // A는 파괴됨. eval[i] 와 evec의 i번째 "열"이 짝.
@@ -239,73 +245,48 @@ inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, f
 // 이진 볼륨 위에서는 중앙차분이 뭉텅뭉텅 꺾인 법선을 내놓는다. 그것이 출발점.
 glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
 	using namespace glm;
-	//---------- v12 : 실시간. 교점 p 중심 정육면체 창에서 바로 PCA ----------
-// 창 범위 : 각 축으로 p-R ~ p+R 안에 드는 정수 복셀
-	int x0 = (int)ceil(p.x - R);
-	int x1 = (int)floor(p.x + R);
-	int y0 = (int)ceil(p.y - R);
-	int y1 = (int)floor(p.y + R);
-	int z0 = (int)ceil(p.z - R);
-	int z1 = (int)floor(p.z + R);
+	//---------- v13 : 공분산 6개 삼선형 보간 -> 픽셀마다 Jacobi ----------
+	int ix = int(p.x);
+	int iy = int(p.y);
+	int iz = int(p.z);
+	float wx = p.x - ix;
+	float wy = p.y - iy;
+	float wz = p.z - iz;
 
-	double Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
-	double Mx = 0, My = 0, Mz = 0;
-	double n = 0;
+	double Cxx = 0, Cyy = 0, Czz = 0, Cxy = 0, Cxz = 0, Cyz = 0;
 
-	for (int z = z0; z <= z1; z++)
-		for (int y = y0; y <= y1; y++)
-			for (int x = x0; x <= x1; x++) {
-				if (x < 0) continue;
-				if (y < 0) continue;
-				if (z < 0) continue;
-				if (x >= VOLX) continue;
-				if (y >= VOLY) continue;
-				if (z >= VOLZ) continue;
-				if (vol[z][y][x] == 0) continue;
+	for (int dz = 0; dz < 2; dz++)
+		for (int dy = 0; dy < 2; dy++)
+			for (int dx = 0; dx < 2; dx++) {
+				double wgt = (dx ? wx : 1.0f - wx)
+					* (dy ? wy : 1.0f - wy)
+					* (dz ? wz : 1.0f - wz);
 
-				// 상대좌표 : 원점이 p. 실수가 된다
-				double fx = x - p.x;
-				double fy = y - p.y;
-				double fz = z - p.z;
-				Mx += fx;  My += fy;  Mz += fz;
-				Sxx += fx * fx;  Syy += fy * fy;  Szz += fz * fz;
-				Sxy += fx * fy;  Sxz += fx * fz;  Syz += fy * fz;
-				n += 1.0;
+				const CovData6& cd = covVol[iz + dz][iy + dy][ix + dx];
+				Cxx += wgt * cd.Cxx;
+				Cyy += wgt * cd.Cyy;
+				Czz += wgt * cd.Czz;
+				Cxy += wgt * cd.Cxy;
+				Cxz += wgt * cd.Cxz;
+				Cyz += wgt * cd.Cyz;
 			}
 
-	vec3 N(0.0f);   // 실패하면 0벡터 그대로
+	double C[3][3];
+	C[0][0] = Cxx;  C[1][1] = Cyy;  C[2][2] = Czz;
+	C[0][1] = C[1][0] = Cxy;
+	C[0][2] = C[2][0] = Cxz;
+	C[1][2] = C[2][1] = Cyz;
 
-	if (n >= N_EPS) {
-		double inv = 1.0 / n;
-		double C[3][3];
-		C[0][0] = Sxx * inv - (Mx * inv) * (Mx * inv);
-		C[1][1] = Syy * inv - (My * inv) * (My * inv);
-		C[2][2] = Szz * inv - (Mz * inv) * (Mz * inv);
-		C[0][1] = C[1][0] = Sxy * inv - (Mx * inv) * (My * inv);
-		C[0][2] = C[2][0] = Sxz * inv - (Mx * inv) * (Mz * inv);
-		C[1][2] = C[2][1] = Syz * inv - (My * inv) * (Mz * inv);
+	double eval[3], evec[3][3];
+	Jacobi3(C, eval, evec);
 
-		double eval[3], evec[3][3];
-		Jacobi3(C, eval, evec);
+	// 가장 작은 고윳값의 고유벡터 = 법선. 부호는 정하지 않는다
+	int k = 0;
+	if (eval[1] < eval[k]) k = 1;
+	if (eval[2] < eval[k]) k = 2;
 
-		// 가장 작은 고윳값의 고유벡터 = 법선
-		int k = 0;
-		if (eval[1] < eval[k]) k = 1;
-		if (eval[2] < eval[k]) k = 2;
-		double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
-
-		double len = sqrt(nx * nx + ny * ny + nz * nz);
-		if (len >= 1e-12) {
-			nx /= len; ny /= len; nz /= len;
-
-			// 부호 : 무게중심의 반대쪽이 바깥
-			if (nx * (-Mx) + ny * (-My) + nz * (-Mz) < 0.0) {
-				nx = -nx; ny = -ny; nz = -nz;
-			}
-			N = vec3((float)nx, (float)ny, (float)nz);
-		}
-	}
-	//---------- v12 끝 ----------
+	vec3 N((float)evec[0][k], (float)evec[1][k], (float)evec[2][k]);
+	//---------- v13 끝 ----------
 
 	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
 	vec3 V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
@@ -424,82 +405,61 @@ void MyInit() {
 	auto preStart = std::chrono::high_resolution_clock::now();//측정용 시간
 	//---------------------------------------전처리 시작
 
-	//for (int z = 0; z < VOLZ; z++)
-	//	for (int y = 0; y < VOLY; y++)
-	//		for (int x = 0; x < VOLX; x++) {
+	for (int z = 0; z < VOLZ; z++)
+		for (int y = 0; y < VOLY; y++)
+			for (int x = 0; x < VOLX; x++) {
 
-	//			//covVol[z][y][x].n = 0.0f;  // 기본은 비어있음 표시
+				//covVol[z][y][x].n = 0.0f;  // 기본은 비어있음 표시
 
-	//			// --- 경계 판정: 6-이웃 중 자신과 다른 값이 하나라도 있으면 경계 (0쪽 1쪽 모두) ---
-	//			if (x == 0 || y == 0 || z == 0 ||
-	//				x == VOLX - 1 || y == VOLY - 1 || z == VOLZ - 1) continue;
+				// --- 경계 판정: 6-이웃 중 자신과 다른 값이 하나라도 있으면 경계 (0쪽 1쪽 모두) ---
+				if (x == 0 || y == 0 || z == 0 ||
+					x == VOLX - 1 || y == VOLY - 1 || z == VOLZ - 1) continue;
 
-	//			unsigned char c = vol[z][y][x];
-	//			bool isBoundary =
-	//				(vol[z][y][x - 1] != c) || (vol[z][y][x + 1] != c) ||
-	//				(vol[z][y - 1][x] != c) || (vol[z][y + 1][x] != c) ||
-	//				(vol[z - 1][y][x] != c) || (vol[z + 1][y][x] != c);
-	//			if (!isBoundary) continue;
+				unsigned char c = vol[z][y][x];
+				bool isBoundary =
+					(vol[z][y][x - 1] != c) || (vol[z][y][x + 1] != c) ||
+					(vol[z][y - 1][x] != c) || (vol[z][y + 1][x] != c) ||
+					(vol[z - 1][y][x] != c) || (vol[z + 1][y][x] != c);
+				if (!isBoundary) continue;
 
-	//			// --- 5x5x5 창에서 값이 1인 복셀의 상대좌표!!를 누적 ---
-	//			float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
-	//			float Mx = 0, My = 0, Mz = 0;
-	//			float n = 0;
+				// --- 5x5x5 창에서 값이 1인 복셀의 상대좌표!!를 누적 ---
+				float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
+				float Mx = 0, My = 0, Mz = 0;
+				float n = 0;
 
-	//			for (int dz = -R; dz <= R; dz++)
-	//				for (int dy = -R; dy <= R; dy++)
-	//					for (int dx = -R; dx <= R; dx++) {
-	//						//if (dx * dx + dy * dy + dz * dz > R * R) continue;
-	//						int nx = x + dx, ny = y + dy, nz = z + dz;
-	//						if (nx < 0 || ny < 0 || nz < 0 ||
-	//							nx >= VOLX || ny >= VOLY || nz >= VOLZ) continue;
-	//						if (vol[nz][ny][nx] == 0) continue;
+				for (int dz = -R; dz <= R; dz++)
+					for (int dy = -R; dy <= R; dy++)
+						for (int dx = -R; dx <= R; dx++) {
+							//if (dx * dx + dy * dy + dz * dz > R * R) continue;
+							int nx = x + dx, ny = y + dy, nz = z + dz;
+							if (nx < 0 || ny < 0 || nz < 0 ||
+								nx >= VOLX || ny >= VOLY || nz >= VOLZ) continue;
+							if (vol[nz][ny][nx] == 0) continue;
 
-	//						float fx = (float)dx, fy = (float)dy, fz = (float)dz;
-	//						Mx += fx;  My += fy;  Mz += fz;
-	//						Sxx += fx * fx;  Syy += fy * fy;  Szz += fz * fz;
-	//						Sxy += fx * fy;  Sxz += fx * fz;  Syz += fy * fz;
-	//						n += 1.0f;
-	//					}
+							float fx = (float)dx, fy = (float)dy, fz = (float)dz;
+							Mx += fx;  My += fy;  Mz += fz;
+							Sxx += fx * fx;  Syy += fy * fy;  Szz += fz * fz;
+							Sxy += fx * fy;  Sxz += fx * fz;  Syz += fy * fz;
+							n += 1.0f;
+						}
 
-	//			/*covVol[z][y][x].Mx = Mx;   covVol[z][y][x].My = My;   covVol[z][y][x].Mz = Mz;
-	//			covVol[z][y][x].Sxx = Sxx; covVol[z][y][x].Syy = Syy; covVol[z][y][x].Szz = Szz;
-	//			covVol[z][y][x].Sxy = Sxy; covVol[z][y][x].Sxz = Sxz; covVol[z][y][x].Syz = Syz;
-	//			covVol[z][y][x].n = n;*/
-	//			//---------- v6 : 여기서 바로 공분산 복원 -> Jacobi -> 법선 ----------
-	//			if (n < N_EPS) continue;   // 창이 비었으면 법선 없음 (0,0,0) 유지
+				/*covVol[z][y][x].Mx = Mx;   covVol[z][y][x].My = My;   covVol[z][y][x].Mz = Mz;
+				covVol[z][y][x].Sxx = Sxx; covVol[z][y][x].Syy = Syy; covVol[z][y][x].Szz = Szz;
+				covVol[z][y][x].Sxy = Sxy; covVol[z][y][x].Sxz = Sxz; covVol[z][y][x].Syz = Syz;
+				covVol[z][y][x].n = n;*/
 
-	//			double inv = 1.0 / n;
-	//			double C[3][3];
-	//			C[0][0] = Sxx * inv - (Mx * inv) * (Mx * inv);
-	//			C[1][1] = Syy * inv - (My * inv) * (My * inv);
-	//			C[2][2] = Szz * inv - (Mz * inv) * (Mz * inv);
-	//			C[0][1] = C[1][0] = Sxy * inv - (Mx * inv) * (My * inv);
-	//			C[0][2] = C[2][0] = Sxz * inv - (Mx * inv) * (Mz * inv);
-	//			C[1][2] = C[2][1] = Syz * inv - (My * inv) * (Mz * inv);
+				//---------- v13 : 공분산만 복원해서 저장. Jacobi 없음 ----------
+				if (n < N_EPS) continue;   // 창이 비었으면 (0,...,0) 유지
 
-	//			double eval[3], evec[3][3];
-	//			Jacobi3(C, eval, evec);
-
-	//			// 가장 작은 고윳값의 고유벡터 = 법선
-	//			int k = 0;
-	//			if (eval[1] < eval[k]) k = 1;
-	//			if (eval[2] < eval[k]) k = 2;
-	//			double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
-
-	//			double len = sqrt(nx * nx + ny * ny + nz * nz);
-	//			if (len < 1e-12) continue;   // 실패. (0,0,0) 유지
-	//			nx /= len; ny /= len; nz /= len;
-
-	//			// 부호 : 무게중심의 반대쪽이 바깥
-	//			if (nx * (-Mx) + ny * (-My) + nz * (-Mz) < 0.0) {
-	//				nx = -nx; ny = -ny; nz = -nz;
-	//			}
-
-	//			normVol[z][y][x].nx = (float)nx;
-	//			normVol[z][y][x].ny = (float)ny;
-	//			normVol[z][y][x].nz = (float)nz;
-	//		}
+				float inv = 1.0f / n;
+				covVol[z][y][x].Cxx = Sxx * inv - (Mx * inv) * (Mx * inv);
+				covVol[z][y][x].Cyy = Syy * inv - (My * inv) * (My * inv);
+				covVol[z][y][x].Czz = Szz * inv - (Mz * inv) * (Mz * inv);
+				covVol[z][y][x].Cxy = Sxy * inv - (Mx * inv) * (My * inv);
+				covVol[z][y][x].Cxz = Sxz * inv - (Mx * inv) * (Mz * inv);
+				covVol[z][y][x].Cyz = Syz * inv - (My * inv) * (Mz * inv);
+				//---------- v13 끝 ----------
+			}
 	//---------------------------------------전처리 끝
 
 	auto preEnd = std::chrono::high_resolution_clock::now();
