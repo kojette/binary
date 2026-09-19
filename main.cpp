@@ -39,8 +39,7 @@ unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 const float N_EPS = 1e-6f;   // nn이 이보다 작으면 법선 없음
 using namespace std;
 //영상 저장용
-const char* SAVE_NAME = "v13_step1.0_전처리(공분산6개저장_상대좌표_정육면체R2_n으로나눔_무게중심버림_법선미계산)렌더링(공분산6개삼선형보간_픽셀마다Jacobi_최소고윳값법선_부호무처리_조명fabs의존_바이섹션10회_법선계산은lighting내부).bmp";
-//---------- 공분산 전처리 (v3 추가) ----------
+const char* SAVE_NAME = "v14_step1.0_전처리(NNT텐서6개저장_상대좌표_정육면체R2_전처리에서Jacobi_최소고윳값법선_부호없음)렌더링(텐서6개삼선형보간_픽셀마다Jacobi_최대고윳값법선_부호원리적소거_바이섹션10회_법선계산은lighting내부).bmp";//---------- 공분산 전처리 (v3 추가) ----------
 const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //
 //struct CovData {
@@ -55,10 +54,15 @@ const int R = 2;  // 이웃 반경. 5x5x5 정육면체
 //NormalData normVol[VOLZ][VOLY][VOLX];//최근접 법선용.  v12는 실시간이라 저장 안해용. 
 
 // v13 : 공분산 6개만 저장. M과 n은 버린다 (24바이트)
-struct CovData6 {
-	float Cxx, Cyy, Czz, Cxy, Cxz, Cyz;
+//struct CovData6 {
+//	float Cxx, Cyy, Czz, Cxy, Cxz, Cyz;
+//};
+//CovData6 covVol[VOLZ][VOLY][VOLX];
+// v14 : NNT 텐서 6개 저장 (대칭이라 6개, 24바이트)
+struct TensorData {
+	float Txx, Tyy, Tzz, Txy, Txz, Tyz;
 };
-CovData6 covVol[VOLZ][VOLY][VOLX];
+TensorData tenVol[VOLZ][VOLY][VOLX];
 
 //---------- 대칭 3x3 고유분해 : Jacobi 회전법 (v3-2 추가) ----------
 // A는 파괴됨. eval[i] 와 evec의 i번째 "열"이 짝.
@@ -245,7 +249,7 @@ inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, f
 // 이진 볼륨 위에서는 중앙차분이 뭉텅뭉텅 꺾인 법선을 내놓는다. 그것이 출발점.
 glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
 	using namespace glm;
-	//---------- v13 : 공분산 6개 삼선형 보간 -> 픽셀마다 Jacobi ----------
+	//---------- v14 : NNT 텐서 6개 삼선형 보간 -> 픽셀마다 Jacobi ----------
 	int ix = int(p.x);
 	int iy = int(p.y);
 	int iz = int(p.z);
@@ -253,7 +257,7 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 	float wy = p.y - iy;
 	float wz = p.z - iz;
 
-	double Cxx = 0, Cyy = 0, Czz = 0, Cxy = 0, Cxz = 0, Cyz = 0;
+	double Txx = 0, Tyy = 0, Tzz = 0, Txy = 0, Txz = 0, Tyz = 0;
 
 	for (int dz = 0; dz < 2; dz++)
 		for (int dy = 0; dy < 2; dy++)
@@ -262,31 +266,31 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 					* (dy ? wy : 1.0f - wy)
 					* (dz ? wz : 1.0f - wz);
 
-				const CovData6& cd = covVol[iz + dz][iy + dy][ix + dx];
-				Cxx += wgt * cd.Cxx;
-				Cyy += wgt * cd.Cyy;
-				Czz += wgt * cd.Czz;
-				Cxy += wgt * cd.Cxy;
-				Cxz += wgt * cd.Cxz;
-				Cyz += wgt * cd.Cyz;
+				const TensorData& td = tenVol[iz + dz][iy + dy][ix + dx];
+				Txx += wgt * td.Txx;
+				Tyy += wgt * td.Tyy;
+				Tzz += wgt * td.Tzz;
+				Txy += wgt * td.Txy;
+				Txz += wgt * td.Txz;
+				Tyz += wgt * td.Tyz;
 			}
 
-	double C[3][3];
-	C[0][0] = Cxx;  C[1][1] = Cyy;  C[2][2] = Czz;
-	C[0][1] = C[1][0] = Cxy;
-	C[0][2] = C[2][0] = Cxz;
-	C[1][2] = C[2][1] = Cyz;
+	double T[3][3];
+	T[0][0] = Txx;  T[1][1] = Tyy;  T[2][2] = Tzz;
+	T[0][1] = T[1][0] = Txy;
+	T[0][2] = T[2][0] = Txz;
+	T[1][2] = T[2][1] = Tyz;
 
 	double eval[3], evec[3][3];
-	Jacobi3(C, eval, evec);
+	Jacobi3(T, eval, evec);
 
-	// 가장 작은 고윳값의 고유벡터 = 법선. 부호는 정하지 않는다
+	// 가장 "큰" 고윳값의 고유벡터 = 법선. 부호는 원리적으로 없다
 	int k = 0;
-	if (eval[1] < eval[k]) k = 1;
-	if (eval[2] < eval[k]) k = 2;
+	if (eval[1] > eval[k]) k = 1;
+	if (eval[2] > eval[k]) k = 2;
 
 	vec3 N((float)evec[0][k], (float)evec[1][k], (float)evec[2][k]);
-	//---------- v13 끝 ----------
+	//---------- v14 끝 ----------
 
 	//vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
 	vec3 V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
@@ -448,17 +452,38 @@ void MyInit() {
 				covVol[z][y][x].Sxy = Sxy; covVol[z][y][x].Sxz = Sxz; covVol[z][y][x].Syz = Syz;
 				covVol[z][y][x].n = n;*/
 
-				//---------- v13 : 공분산만 복원해서 저장. Jacobi 없음 ----------
-				if (n < N_EPS) continue;   // 창이 비었으면 (0,...,0) 유지
+				//---------- v14 : 법선을 구한 뒤 NNT로 만들어 저장 ----------
+				if (n < N_EPS) continue;
 
-				float inv = 1.0f / n;
-				covVol[z][y][x].Cxx = Sxx * inv - (Mx * inv) * (Mx * inv);
-				covVol[z][y][x].Cyy = Syy * inv - (My * inv) * (My * inv);
-				covVol[z][y][x].Czz = Szz * inv - (Mz * inv) * (Mz * inv);
-				covVol[z][y][x].Cxy = Sxy * inv - (Mx * inv) * (My * inv);
-				covVol[z][y][x].Cxz = Sxz * inv - (Mx * inv) * (Mz * inv);
-				covVol[z][y][x].Cyz = Syz * inv - (My * inv) * (Mz * inv);
-				//---------- v13 끝 ----------
+				double inv = 1.0 / n;
+				double C[3][3];
+				C[0][0] = Sxx * inv - (Mx * inv) * (Mx * inv);
+				C[1][1] = Syy * inv - (My * inv) * (My * inv);
+				C[2][2] = Szz * inv - (Mz * inv) * (Mz * inv);
+				C[0][1] = C[1][0] = Sxy * inv - (Mx * inv) * (My * inv);
+				C[0][2] = C[2][0] = Sxz * inv - (Mx * inv) * (Mz * inv);
+				C[1][2] = C[2][1] = Syz * inv - (My * inv) * (Mz * inv);
+
+				double eval[3], evec[3][3];
+				Jacobi3(C, eval, evec);
+
+				int k = 0;
+				if (eval[1] < eval[k]) k = 1;
+				if (eval[2] < eval[k]) k = 2;
+				double nx = evec[0][k], ny = evec[1][k], nz = evec[2][k];
+
+				double len = sqrt(nx * nx + ny * ny + nz * nz);
+				if (len < 1e-12) continue;   // 실패. (0,...,0) 유지
+				nx /= len; ny /= len; nz /= len;
+
+				// 부호 판정 없음. NNT는 N을 뒤집어도 같다
+				tenVol[z][y][x].Txx = (float)(nx * nx);
+				tenVol[z][y][x].Tyy = (float)(ny * ny);
+				tenVol[z][y][x].Tzz = (float)(nz * nz);
+				tenVol[z][y][x].Txy = (float)(nx * ny);
+				tenVol[z][y][x].Txz = (float)(nx * nz);
+				tenVol[z][y][x].Tyz = (float)(ny * nz);
+				//---------- v14 끝 ----------
 			}
 	//---------------------------------------전처리 끝
 
