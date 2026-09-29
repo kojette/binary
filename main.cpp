@@ -1,9 +1,4 @@
-﻿// main_v5_bench.cpp
-// v4 -> v5 : 테이블 CPU 생성 시간을 5회 반복 측정(평균/최소)으로 바꿈
-//            GPU 생성 테이블을 받아 CPU판과 최대오차 대조하는 CompareTables 추가
-//            측정 중 카메라를 고정하는 스위치(FIX_CAMERA) 추가 — 변인 하나 원칙
-
-#include <GL/glut.h>
+﻿#include <GL/glut.h>
 #include <iostream>
 #include <fstream>
 #include <stdio.h>
@@ -14,154 +9,70 @@
 #include <vector>
 #include <algorithm>
 // 시간 측정등 고성능 함수
-#include <chrono>
-using namespace std;
+#include <chrono> 
+#include <cuda_runtime.h>   // v0 : cudaMalloc 등 (커널은 cu 파일)
 
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 800
-#define WIDTH   2048
-#define HEIGHT  2048
+#define WIDTH   512
+#define HEIGHT  512
 #define VOLX 256
-#define VOLY 256
+#define VOLY 256	
 #define VOLZ 225
 const int BSIZE = 8;
 const int BSHIFT = 3;
 
-//====== 측정용 스위치 =========================================================
-// 1 이면 카메라를 한 자리에 못박는다.
-// 왜 필요한가: MyDisplay 는 매 프레임 eye 를 움직인다. 시점이 바뀌면 광선이
-//             볼륨을 지나는 길이가 바뀌고, 조기종료 시점도 바뀐다. 그 상태로
-//             버전 1/2/3 시간을 비교하면 무엇이 시간을 바꿨는지 알 수 없다.
-#define FIX_CAMERA 1
-#define TABLE_BENCH_RUNS 5   // CPU 테이블 생성을 몇 번 반복해 잴 것인가
-//=============================================================================
+const int ISO = 120; //iso
+const float ISO_LEVEL = 0.5f;
+
+//수정A-1: 전역 파라미터로 관리(BSIZE로 나누되, 나머지 있음 +1)
+const int BZ_COUNT = VOLZ / BSIZE + (VOLZ % BSIZE != 0); // 29
+const int BY_COUNT = VOLY / BSIZE + (VOLY % BSIZE != 0); // 32
+const int BX_COUNT = VOLX / BSIZE + (VOLX % BSIZE != 0); // 32
 
 unsigned char ImageBuf[HEIGHT][WIDTH];
 unsigned char MyTexture[HEIGHT][WIDTH][3];
 unsigned char vol[VOLZ][VOLY][VOLX];
 
-//수정 이전
-const int BZ_COUNT = VOLZ / BSIZE + (VOLZ % BSIZE != 0); // 29
-const int BY_COUNT = VOLY / BSIZE + (VOLY % BSIZE != 0); // 32
-const int BX_COUNT = VOLX / BSIZE + (VOLX % BSIZE != 0); // 32
+
+// 제거 : bm(블록 최소값). 이진에서는 "1이 하나라도 있나"만 보면 되므로
 unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
-unsigned char bm[BZ_COUNT][BY_COUNT][BX_COUNT];
 
-float alphaTable[256];
-float sumTable[256];
-float colorTableR[256];
-float colorTableG[256];
-float colorTableB[256];
+using namespace std;
 
-//pre-integration
-// 주의: cumain.cu 에도 같은 이름의 #define 이 있다. 두 값이 다르면 테이블과
-//       광선이 서로 다른 구간 길이를 쓴다. 반드시 같은 값으로 둘 것.
-#define DEFAULT_SEGMENT_LENGTH 0.5f  // 구간 길이. 커널의 step 과 같은 값 (0.5 -> 2.0)
-#define TABLE_SIZE 256
-// 좌표축이 (sf, sb) 두 개인 2D 테이블. CPU에서 만든 뒤 GPU로 1회 업로드.
-// 배열은 1차원으로
-float preAlpha[TABLE_SIZE * TABLE_SIZE];
-float preColorR[TABLE_SIZE * TABLE_SIZE];
-float preColorG[TABLE_SIZE * TABLE_SIZE];
-float preColorB[TABLE_SIZE * TABLE_SIZE];
 
-// 추가: GPU 가 만든 표를 받아둘 곳. 렌더링에는 쓰지 않고 대조에만 쓴다.
-float gpuAlpha[TABLE_SIZE * TABLE_SIZE];
-float gpuColorR[TABLE_SIZE * TABLE_SIZE];
-float gpuColorG[TABLE_SIZE * TABLE_SIZE];
-float gpuColorB[TABLE_SIZE * TABLE_SIZE];
+//====================================================================
+// v0 : CUDA 대표 파이프라인
+//   전처리 1단계 : 등방 PCA (정육면체 창 R) -> 1차 공분산 A
+//   전처리 2단계 : A 로 n0, rho -> 미끄럼틀로 sigma_t -> 팬케이크 PCA -> 2차 공분산 B
+//   실시간       : 이진 바이섹션 교점 + 8이웃 B 를 (확신 w x 삼선형) 가중합 -> 최소 고유벡터
+//====================================================================
+// 1단계 파라미터 [사용자 결정 R=3]
+const int   R_KER = 3;                  // 정육면체 창 반경
+const float SIGMA = R_KER / 3.0f;       // 가우시안 폭 (3 sigma = R)
+const float SPACING = 1.0f;             // 0.5 지점 수집 선 간격 (1 = 간선 중점)
+// 2단계 파라미터
+const float SIGMA_N = 0.6f;             // 팬케이크 법선 방향 폭 [문서 제안]
+const float SIGMA_T_MAX = 4.0f;         // 팬케이크 접선 방향 최대 폭 [문서 제안]
+const float RHO_FALLBACK = 0.7f;        // rho 이 이상이면 B = A [Claude 추천 임시]
+const float RHO_SCALE = 0.3f;           // 미끄럼틀 s = 1/(1+(rho/0.3)^2) 의 0.3 [Claude 추천 임시]
 
-//구조체----------------------------------------------------------------
-struct alphaPoint {
-	int x;//density
-	float y;//alpha
-};
+// GPU 메모리 (Render 에서도 써야 하므로 전역)
+unsigned char* d_vol = 0;   // 이진 볼륨
+unsigned char* d_bM = 0;    // 블록 최대값
+float* d_A = 0;             // 1차 공분산 6성분 (xx, yy, zz, xy, xz, yz), 띠 밖 = 0
+float* d_B = 0;             // 2차 공분산 6성분, 띠 밖 = 0
+unsigned char* d_img = 0;   // 렌더 결과 RGB
 
-class AlphaTable {
-public:
-	vector<alphaPoint> alphas;
-	void AddPoint(int x, float y) {
-		alphas.push_back({ x, y });
-	}
-	void MakeAlphaTable(float alphaTable[256]) {
-		if (alphas.size() < 2) return;//만약 점 안 찍을 경우 예외가 없을 것을 대비
 
-		//x 기준 정렬
-		sort(alphas.begin(), alphas.end(), [](const alphaPoint& a, const alphaPoint& b) {
-			return a.x < b.x;
-			});
-		for (int i = 0; i < alphas.size() - 1; i++) {//구간 별
-			int x0 = alphas[i].x;
-			int x1 = alphas[i + 1].x;
-			float y0 = alphas[i].y;
-			float y1 = alphas[i + 1].y;
+// ---- cu 파일의 창구 함수 선언 (커널 실행은 cu 쪽에서) ----
+void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma, float spacing);
+void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z, float spacing,
+	float sn, float stMax, float rhoFb, float rhoScale);
+void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
+	const float eye[3], const float u[3], const float v[3], const float w[3]);
 
-			float _len = 1 / float(x1 - x0);
-			for (int j = x0; j <= x1; j++) {//한 구간 내
-				float a = (y0 * (x1 - j) + y1 * (j - x0)) * _len;
-				if (a < 0) a = 0;
-				else if (a > 1) a = 1;
-				alphaTable[j] = a;
-			}
-		}
-	}
-};
-
-//color버전
-struct colorPoint {
-	int x;      // density
-	float r;    // red
-	float g;    // green
-	float b;    // blue
-};
-
-class ColorTable {
-public:
-	vector<colorPoint> colors;
-
-	void AddPoint(int x, float r, float g, float b) {
-		colors.push_back({ x, r, g, b });
-	}
-
-	void MakeColorTable(float colorTableR[256],
-		float colorTableG[256],
-		float colorTableB[256]) {
-		if (colors.size() < 2) return; //점 부족 예외 처리
-
-		//x 기준 정렬
-		sort(colors.begin(), colors.end(),
-			[](const colorPoint& a, const colorPoint& b) {
-				return a.x < b.x;
-			});
-
-		for (int i = 0; i < colors.size() - 1; i++) {
-			//가독성 정리
-			int x0 = colors[i].x;
-			int x1 = colors[i + 1].x;
-
-			float r0 = colors[i].r;
-			float g0 = colors[i].g;
-			float b0 = colors[i].b;
-
-			float r1 = colors[i + 1].r;
-			float g1 = colors[i + 1].g;
-			float b1 = colors[i + 1].b;
-
-			for (int j = x0; j <= x1; j++) {
-				float t = float(j - x0) / float(x1 - x0);//나눗셈 연산 비싸니까 한번으로
-
-				float r = r0 * (1 - t) + r1 * t;
-				float g = g0 * (1 - t) + g1 * t;
-				float b = b0 * (1 - t) + b1 * t;
-
-				colorTableR[j] = glm::clamp(r, 0.0f, 1.0f);//보여주신 함수?
-				colorTableG[j] = glm::clamp(g, 0.0f, 1.0f);
-				colorTableB[j] = glm::clamp(b, 0.0f, 1.0f);
-			}
-		}
-	}
-};
-//함수들----------------------------------------------------------------
+//가벼운 함수----------------------------------------------------------
 void FileRead()
 {
 	std::ifstream myfile;
@@ -173,44 +84,48 @@ void FileRead()
 	myfile.close();
 }
 
-inline bool isOutside(const glm::vec3& p) {//범위 처리 따라, 알파 컬러에서는 불필요
-	if (p.x >= VOLX || p.x < 0 ||
-		p.y >= VOLY || p.y < 0 ||
-		p.z >= VOLZ || p.z < 0) return true;
-	else
-		return false;
-}
-
 void GenBlocks() { //수정A-2: 29, 32, 32에서 각각 B~_COUNT
-	for (int bz = 0; bz < BZ_COUNT; bz++) // BZ = 28
+	for (int bz = 0; bz < BZ_COUNT; bz++) // BZ = 28 
 		for (int by = 0; by < BY_COUNT; by++)
 			for (int bx = 0; bx < BX_COUNT; bx++) { // 각 블록에 대해서
-				unsigned char max_value = 0, min_value = 255;
+				unsigned char max_value = 0;
 				// 최대값을 추출해서 //(개선+; 경계값 추가)
-				for (int z = bz * BSIZE; z <= __min(bz * BSIZE + BSIZE, VOLZ - 1); z++) {
+				for (int z = bz * BSIZE; z <= __min(bz * BSIZE + BSIZE, VOLZ - 1); z++) { // 28*8 = for 224      z<232      vol[226]
 					for (int y = by * BSIZE; y <= __min(by * BSIZE + BSIZE, VOLY - 1); y++) {
-						for (int x = bx * BSIZE; x <= __min(bx * BSIZE + BSIZE, VOLX - 1); x++) {
+						for (int x = bx * BSIZE; x <= __min(bx * BSIZE + BSIZE, VOLX - 1); x++) { //bx=31, 31*8=248~256
 							max_value = __max(vol[z][y][x], max_value);
-							min_value = __min(vol[z][y][x], min_value);
 						}
 					}
 				}
 				// 저장한다.
 				bM[bz][by][bx] = max_value;
-				bm[bz][by][bx] = min_value;
 			}
-	printf("max = %d, min = %d \n", bM[14][16][16], bm[14][16][16]);
+	printf("max = %d \n", bM[14][16][16]);
 }
 
-int GetDensity(glm::vec3 p) {
+inline bool isOutside(const glm::vec3& p) {//범위 처리 따라, 알파 컬러에서는 불필요
+	if (p.x >= VOLX - 1 || p.x < 0 ||//여기 -1로 처리함
+		p.y >= VOLY - 1 || p.y < 0 ||
+		p.z >= VOLZ - 1 || p.z < 0) return true;
+	else
+		return false;
+}
+
+int inline GetBlockId(glm::vec3 p) {//(개선+); 시프트 연산자로 블록 아이디 계산
+	int x = p.x, y = p.y, z = p.z;
+	int bx = x >> BSHIFT, by = y >> BSHIFT, bz = z >> BSHIFT;
+	return (bx << 10) | (by << 5) | bz; // 수정A-4: 시프트 복호화로(어차피 진수표현만 상이)
+}
+
+//float화
+float GetDensity(glm::vec3 p) {
 	int ix = int(p.x); // 4.8 ->  4
 	int iy = int(p.y); // 4.8 ->  4
 	int iz = int(p.z); // 4.8 ->  4
 	float wx = p.x - ix;
 	float wy = p.y - iy;
 	float wz = p.z - iz;
-	//000	001 010 011 100 101 110 111
-	int den = vol[iz][iy][ix] * (1 - wx) * (1 - wy) * (1 - wz)
+	float den = vol[iz][iy][ix] * (1 - wx) * (1 - wy) * (1 - wz)
 		+ vol[iz][iy][ix + 1] * (wx) * (1 - wy) * (1 - wz)
 		+ vol[iz][iy + 1][ix] * (1 - wx) * (wy) * (1 - wz)
 		+ vol[iz][iy + 1][ix + 1] * (wx) * (wy) * (1 - wz)
@@ -221,146 +136,102 @@ int GetDensity(glm::vec3 p) {
 	return den;
 }
 
-void InitTables() {
-	AlphaTable mat;
-	mat.AddPoint(0, 0.0f);      //공기&연조직 비가시
-	mat.AddPoint(90, 0.0f);
-	mat.AddPoint(98, 0.85f);    //여기부터 8단위로 진동
-	mat.AddPoint(106, 0.0f);
-	mat.AddPoint(114, 0.85f);
-	mat.AddPoint(122, 0.0f);
-	mat.AddPoint(130, 0.85f);
-	mat.AddPoint(138, 0.0f);
-	mat.AddPoint(146, 0.85f);
-	mat.AddPoint(154, 0.0f);
-	mat.AddPoint(162, 0.85f);
-	mat.AddPoint(170, 0.0f);
-	mat.AddPoint(178, 0.85f);
-	mat.AddPoint(186, 0.0f);
-	mat.AddPoint(194, 0.85f);
-	mat.AddPoint(202, 0.0f);
-	mat.AddPoint(210, 0.85f);
-	mat.AddPoint(218, 0.0f);
-	mat.AddPoint(226, 0.85f);
-	mat.AddPoint(234, 0.0f);
-	mat.AddPoint(242, 0.85f);
-	mat.AddPoint(250, 0.0f);
-	mat.AddPoint(255, 0.0f);
-	mat.MakeAlphaTable(alphaTable);
-
-	sumTable[0] = alphaTable[0];
-	for (int i = 1; i < 256; i++) {
-		sumTable[i] = sumTable[i - 1] + alphaTable[i];
-	} //in : alphaTable, out : sumTable
-
-	ColorTable ct;
-	ct.AddPoint(0, 0.0f, 0.0f, 0.0f);
-	ct.AddPoint(90, 0.1f, 0.2f, 0.55f);
-	ct.AddPoint(106, 0.95f, 0.3f, 0.2f);   //봉우리마다 색이 바뀌도록
-	ct.AddPoint(122, 0.2f, 0.9f, 0.4f);
-	ct.AddPoint(138, 0.3f, 0.4f, 1.0f);
-	ct.AddPoint(154, 0.95f, 0.85f, 0.2f);
-	ct.AddPoint(170, 0.9f, 0.3f, 0.9f);
-	ct.AddPoint(186, 0.2f, 0.9f, 0.9f);
-	ct.AddPoint(202, 0.95f, 0.5f, 0.2f);
-	ct.AddPoint(218, 0.4f, 0.95f, 0.5f);
-	ct.AddPoint(234, 0.5f, 0.4f, 1.0f);
-	ct.AddPoint(255, 1.0f, 0.8f, 0.85f);
-	ct.MakeColorTable(colorTableR, colorTableG, colorTableB);
+// 부호장 : 안쪽이면 양수, 바깥이면 음수
+//--------------------------------------------------------------------
+// 변경 : 임계값 ISO(120) -> ISO_LEVEL(0.5)
+//--------------------------------------------------------------------
+inline float Phi(const glm::vec3& p) {
+	if (isOutside(p)) return 0.0f - ISO_LEVEL;
+	return GetDensity(p) - ISO_LEVEL;
 }
 
-int inline GetBlockId(glm::vec3 p) {//(개선+); 시프트 연산자로 블록 아이디 계산
-	int x = p.x, y = p.y, z = p.z;
-	int bx = x >> BSHIFT, by = y >> BSHIFT, bz = z >> BSHIFT;
-	return (bx << 10) | (by << 5) | bz; // 수정A-4: 시프트 복호화로(어차피 진수표현만 상이)
+//--------------------------------------------------------------------
+// 보류 : 바이섹션. 이번 버전에서는 호출하지 않는다.
+//--------------------------------------------------------------------
+glm::vec3 Bisect(glm::vec3 a, glm::vec3 b) {   // a는 바깥, b는 안쪽
+	for (int i = 0; i < 10; i++) {
+		glm::vec3 m = (a + b) * 0.5f;//중점!
+		if (Phi(m) < 0.0f) a = m;   // m이 바깥이면 a를 교체
+		else               b = m;   // m이 안쪽이면 b를 교체
+	}
+	return (a + b) * 0.5f;
 }
 
-// 수정: void -> float. 한 번 도는 데 걸린 ms 를 돌려준다.
-// 왜: 바깥에서 여러 번 돌려 평균과 최소를 내려면 값이 필요하다.
-float BuildPreIntegrationTable() {
-	auto t_start = std::chrono::high_resolution_clock::now();//
-	for (int sf = 0; sf < TABLE_SIZE; sf++) {          // front
-		for (int sb = 0; sb < TABLE_SIZE; sb++) {      // back
-			int idx = sf * TABLE_SIZE + sb;
+// 수정B-1: AABB 박스 체크 함수 분리~
+inline bool AABB_box_check(const glm::vec3& RS, const glm::vec3& w, float& tm, float& tM) {
+	float t1, t2;
 
-			float r_sum = 0.0f, g_sum = 0.0f, b_sum = 0.0f, a_sum = 0.0f;
+	t1 = -RS.x / w.x;
+	t2 = ((VOLX - 1) - RS.x) / w.x; // 수정A-3: 하드코딩제거(255-RS.x)->((VOLX-1)-RS.x)
+	float xm = __min(t1, t2), xM = __max(t1, t2);
+	t1 = -RS.y / w.y;
+	t2 = ((VOLY - 1) - RS.y) / w.y;
+	float ym = __min(t1, t2), yM = __max(t1, t2);
+	t1 = -RS.z / w.z;
+	t2 = ((VOLZ - 1) - RS.z) / w.z;
+	float zm = __min(t1, t2), zM = __max(t1, t2);
+	tm = __max(__max(xm, ym), zm);
+	tM = __min(__min(xM, yM), zM);
 
-			int n = (sb > sf) ? (sb - sf) : (sf - sb);  // 부분샘플 개수
-			if (n == 0) {//밀도 변화 없음
-				float a = alphaTable[sf];
-				a = 1.0f - powf(1.0f - a, DEFAULT_SEGMENT_LENGTH);
-				a_sum = a;
-				r_sum = colorTableR[sf] * a;
-				g_sum = colorTableG[sf] * a;
-				b_sum = colorTableB[sf] * a;
-			}
-			else {
-				float width = (float)n;
-				float inv_width = DEFAULT_SEGMENT_LENGTH / width;             // 부분샘플 두께
-				int dir = (sb > sf) ? 1 : -1;               // 광선 진행 방향(sf -> sb)
+	return tm < tM; // 교점 유효한거 있으면 참 리턴
+}
 
-				for (int i = sf; i != sb; i += dir) {
-					float alpha = alphaTable[i];
-					if (alpha > 0.0f) {
-						// alpha correction
-						float ca = 1.0f - powf(1.0f - alpha, inv_width);
+// 수정B-2: 조명 연산 함수로 분리~
+// 이진 볼륨 위에서는 중앙차분이 뭉텅뭉텅 꺾인 법선을 내놓는다. 그것이 출발점.
+glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w) {
+	using namespace glm;
+	//중앙차분법 기울기(노말) 계산
+	float dx = (GetDensity(p + vec3(1, 0, 0)) - GetDensity(p - vec3(1, 0, 0))) * 0.5f;
+	float dy = (GetDensity(p + vec3(0, 1, 0)) - GetDensity(p - vec3(0, 1, 0))) * 0.5f;
+	float dz = (GetDensity(p + vec3(0, 0, 1)) - GetDensity(p - vec3(0, 0, 1))) * 0.5f;
 
-						r_sum += (1.0f - a_sum) * colorTableR[i] * ca;
-						g_sum += (1.0f - a_sum) * colorTableG[i] * ca;
-						b_sum += (1.0f - a_sum) * colorTableB[i] * ca;
-						a_sum += (1.0f - a_sum) * ca;
+	vec3 N(dx, dy, dz), V = -w, L = glm::normalize(-w + 0.3f * vec3(0, 1, 0));
+	if (length(N) > 0.0f) N = normalize(N);
 
-						if (a_sum > 0.99f) break;
-					}
-				}
-			}
+	vec3 H = normalize(L + V);
 
-			// 한 구간을 통째로 합성한 결과를 저장
-			preAlpha[idx] = a_sum;
-			preColorR[idx] = r_sum;
-			preColorG[idx] = g_sum;
-			preColorB[idx] = b_sum;
+	float NL = fabs(dot(N, L));
+	float NH = fabs(dot(N, H));
+
+	float Ia = 0.25f, Id = 0.5f, Is = 0.9f;//살짝 밝게 // 합이 1인게 좋은데 여러 표현 가능
+	vec3 Ka = rgb * 0.8f; //주변광 반사율 0.8 곱(어두운 배경 연출)
+	vec3 Kd = rgb;
+	vec3 Ks(1.2f, 0.8f, 0.8f); // 오팔 느낌
+
+	vec3 I = Ia * Ka + Id * Kd * NL + Is * Ks * pow(NH, 30.0f);
+	return clamp(I, 0.0f, 1.0f);
+}
+
+void SaveBMP(const char* filename) {//사진 저장(v1)
+	int pad = (4 - (WIDTH * 3) % 4) % 4;
+	int dataSize = (WIDTH * 3 + pad) * HEIGHT;
+	int fileSize = 54 + dataSize;
+	unsigned char header[54] = { 0 };
+	header[0] = 'B'; header[1] = 'M';
+	header[2] = fileSize; header[3] = fileSize >> 8;
+	header[4] = fileSize >> 16; header[5] = fileSize >> 24;
+	header[10] = 54; header[14] = 40;
+	header[18] = WIDTH; header[19] = WIDTH >> 8;
+	header[20] = WIDTH >> 16; header[21] = WIDTH >> 24;
+	header[22] = HEIGHT; header[23] = HEIGHT >> 8;
+	header[24] = HEIGHT >> 16; header[25] = HEIGHT >> 24;
+	header[26] = 1; header[28] = 24;
+	header[34] = dataSize; header[35] = dataSize >> 8;
+	header[36] = dataSize >> 16; header[37] = dataSize >> 24;
+
+	std::ofstream f(filename, std::ios::out | std::ios::binary);
+	if (!f.is_open()) { std::cout << "save error : " << filename << std::endl; return; }
+	f.write((char*)header, 54);
+	unsigned char padding[3] = { 0, 0, 0 };
+	for (int y = 0; y < HEIGHT; y++) {
+		for (int x = 0; x < WIDTH; x++) {
+			unsigned char bgr[3] = { MyTexture[y][x][2], MyTexture[y][x][1], MyTexture[y][x][0] };
+			f.write((char*)bgr, 3);
 		}
+		f.write((char*)padding, pad);
 	}
-	auto t_end = std::chrono::high_resolution_clock::now();     // 추가
-	auto dur = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
-	return dur.count() * 0.001f;
-}
-
-// 추가: CPU 생성을 여러 번 돌려 평균/최소를 낸다.
-// 왜 최소도 보나: 최소값이 "방해받지 않았을 때의 진짜 실력"에 가장 가깝다.
-//               평균은 백그라운드 작업에 오염되기 쉽다.
-void BenchTableCPU() {
-	float sum = 0.0f, lo = 1e9f;
-	for (int i = 0; i < TABLE_BENCH_RUNS; i++) {
-		float ms = BuildPreIntegrationTable();
-		sum += ms;
-		if (ms < lo) lo = ms;
-		printf("[CPU table] run %d : %.3f ms\n", i, ms);
-	}
-	printf("[CPU table] mean %.3f ms, min %.3f ms (%dx%d = %d entries, seg=%.2f)\n",
-		sum / TABLE_BENCH_RUNS, lo, TABLE_SIZE, TABLE_SIZE,
-		TABLE_SIZE * TABLE_SIZE, DEFAULT_SEGMENT_LENGTH);
-}
-
-// 추가: CPU판과 GPU판이 같은 표를 만들었는지 숫자로 대조한다.
-// 왜: 시간만 재고 값을 안 맞춰보면, 빨리 틀린 답을 낸 것을 자랑하게 된다.
-void CompareTables() {
-	float maxA = 0.0f, maxR = 0.0f;
-	int worst = 0;
-	for (int i = 0; i < TABLE_SIZE * TABLE_SIZE; i++) {
-		float da = preAlpha[i] - gpuAlpha[i];
-		if (da < 0.0f) da = -da;
-		float dr = preColorR[i] - gpuColorR[i];
-		if (dr < 0.0f) dr = -dr;
-		if (da > maxA) { maxA = da; worst = i; }
-		if (dr > maxR) maxR = dr;
-	}
-	printf("[compare] max |alpha diff| = %.9f at idx %d (sf=%d, sb=%d)\n",
-		maxA, worst, worst >> 8, worst & 0xFF);
-	printf("[compare] max |R diff|     = %.9f\n", maxR);
-	printf("[compare] sample idx 30000 : cpu a=%.9f  gpu a=%.9f\n",
-		preAlpha[30000], gpuAlpha[30000]);
+	f.close();
+	std::cout << "saved : " << filename << std::endl;
 }
 
 void Render(glm::vec3 eye) {
@@ -373,154 +244,116 @@ void Render(glm::vec3 eye) {
 	glm::vec3 u = glm::normalize(glm::cross(up, w));
 	glm::vec3 v = glm::normalize(glm::cross(w, u));
 
-
 	auto start = std::chrono::high_resolution_clock::now();
-	const float supersampling = 0.5f * (512.0f / WIDTH);
-	/////////////////레이캐스팅
-	for (int y = 0; y < HEIGHT; y++) { // 영상의 y좌표
-		for (int x = 0; x < WIDTH; x++) { // 영상의 x좌표
-			glm::vec3 RS = eye + u * (x - WIDTH * 0.5f) * supersampling + v * (y - HEIGHT * 0.5f) * supersampling;
+	/////////////////레이캐스팅 : v0 GPU (픽셀 하나 = 스레드 하나)
+	int nPix = WIDTH * HEIGHT;
+	float e3[3] = { eye.x, eye.y, eye.z }, u3[3] = { u.x, u.y, u.z }, v3[3] = { v.x, v.y, v.z }, w3[3] = { w.x, w.y, w.z };
+	GpuRender(d_vol, d_bM, d_B, d_img, e3, u3, v3, w3);
+	cudaError_t err = cudaGetLastError();
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] 렌더 커널 실행 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaDeviceSynchronize();
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] 렌더 커널 수행 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMemcpy(&MyTexture[0][0][0], d_img, nPix * 3, cudaMemcpyDeviceToHost);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] 이미지 복사 : " << cudaGetErrorString(err) << std::endl;
 
-			float t1, t2; // 한 구간
-			t1 = -RS.x / w.x;
-			t2 = (255 - RS.x) / w.x;
-			float xm = __min(t1, t2);
-			float xM = __max(t1, t2);
-
-			t1 = -RS.y / w.y;
-			t2 = (255 - RS.y) / w.y;
-			float ym = __min(t1, t2);
-			float yM = __max(t1, t2);
-
-			t1 = -RS.z / w.z;
-			t2 = (224 - RS.z) / w.z;
-			float zm = __min(t1, t2);
-			float zM = __max(t1, t2);
-			float tm = __max(__max(xm, ym), zm);
-			float tM = __min(__min(xM, yM), zM);
-
-			float r_sum = 0.0f, g_sum = 0.0f, b_sum = 0.0f;
-			float a_sum = 0.0f;
-
-			// 수정: 하드코딩 0.5 -> 공통 상수. CPU 경로와 GPU 경로가 갈라지지 않게.
-			const float step = DEFAULT_SEGMENT_LENGTH;
-			for (float t = tm; t < tM; t = t + step) { // 광선을 진행하자
-				glm::vec3 p = RS + w * t;
-				if (isOutside(p))
-					continue;
-
-				// 내(p)가 속한 블록의 min, max 안다고 가정.
-				int bid = GetBlockId(p); // 123456
-				// 수정A-5: 비트연산자 활용해 봄.
-				int bz = bid & 0x1F;
-				int by = (bid >> 5) & 0x1F;
-				int bx = (bid >> 10) & 0x1F;
-				int min_value = bm[bz][by][bx];
-				int max_value = bM[bz][by][bx];
-				if (sumTable[max_value] - sumTable[min_value - 1] == 0) {
-					float jump = 0;
-					int nextBid;
-					// 투명한 블록이니까, 연산을 건너뛰자. 광선을 빠르게 전진하자.
-					do {
-						jump += 1.0f;
-						nextBid = GetBlockId(p + w * jump); // 추가 전진
-					} while (bid == nextBid);
-					t = t + (jump - step);
-					continue;
-				}
-
-
-				int d = GetDensity(p);
-
-				float alpha = alphaTable[d];
-				if (alpha == 0)
-					continue;
-				alpha = 1 - pow((1 - alpha), step); // alpha-correction
-
-
-				float r = colorTableR[d];
-				float g = colorTableG[d];
-				float b = colorTableB[d];
-
-				//조명; 중앙차분법
-				float dx = (GetDensity(p + vec3(1, 0, 0)) - GetDensity(p - vec3(1, 0, 0))) * 0.5f;
-				float dy = (GetDensity(p + vec3(0, 1, 0)) - GetDensity(p - vec3(0, 1, 0))) * 0.5f;
-				float dz = (GetDensity(p + vec3(0, 0, 1)) - GetDensity(p - vec3(0, 0, 1))) * 0.5f;
-
-				vec3 V = w;
-				vec3 N(dx, dy, dz), L = w;
-
-				if (length(N) > 0.0f) N = normalize(N);
-				vec3 H = normalize(L + V);
-				float NL = fabs(dot(N, L));
-				float NH = fabs(dot(N, H));
-
-				float Ia = 0.25f, Id = 0.5f, Is = 0.9f;
-
-				glm::vec3 Ka(r * 0.8f, g * 0.8f, b * 0.8f);
-				glm::vec3 Kd(r, g, b);
-				glm::vec3 Ks(1.2f, 0.8f, 0.8f); //오팔 느낌
-
-				glm::vec3 I = Ia * Ka + Id * Kd * NL + Is * Ks * pow(NH, 30.0f);
-				I = glm::clamp(I, 0.0f, 1.0f);//__min
-
-				r_sum += (1.0f - a_sum) * (I.r * alpha);
-				g_sum += (1.0f - a_sum) * (I.g * alpha);
-				b_sum += (1.0f - a_sum) * (I.b * alpha);
-				a_sum += (1.0f - a_sum) * alpha;
-				if (a_sum > 0.99f) break; // 조기 광선 종료, early ray termination
-
-			}
-			MyTexture[y][x][0] = int(r_sum * 255);
-			MyTexture[y][x][1] = int(g_sum * 255);
-			MyTexture[y][x][2] = int(b_sum * 255);
-
-		}
-	}
 	auto end = std::chrono::high_resolution_clock::now();
 	auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 	std::cout << "실행 시간: " << duration.count() * 0.001f << " ms" << std::endl;
+	glTexImage2D(GL_TEXTURE_2D, 0, 3, WIDTH, HEIGHT, 0, GL_RGB,
+		GL_UNSIGNED_BYTE, &MyTexture[0][0][0]);
 }
-
-extern "C" int cuInit();
-extern "C" float cuBuildPreIntegrationTable();   // 추가
 
 void MyInit() {
 	glClearColor(0.0, 0.0, 0.0, 0.0);
 	FileRead();
+
+
+	// 이진화 전처리. 반드시 GenBlocks() 보다 먼저 와야 한다.
+	for (int z = 0; z < VOLZ; z++)
+		for (int y = 0; y < VOLY; y++)
+			for (int x = 0; x < VOLX; x++)
+				vol[z][y][x] = (vol[z][y][x] >= ISO);
+	printf("binarized (ISO = %d, inside : d >= ISO)\n", ISO);
+	//--------------------------------------------------------------------
+
 	GenBlocks(); // 파일은 읽고 난 다음에.
+
+	//==================== v0 : GPU 메모리 준비 ====================
+	cudaError_t err;
+	size_t nVox = (size_t)VOLX * VOLY * VOLZ;
+	size_t covBytes = nVox * 6 * sizeof(float);          // A, B 각각 약 354MB
+	err = cudaMalloc(&d_vol, nVox);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_vol 할당 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMemcpy(d_vol, vol, nVox, cudaMemcpyHostToDevice);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_vol 복사 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMalloc(&d_bM, sizeof(bM));
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_bM 할당 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMemcpy(d_bM, bM, sizeof(bM), cudaMemcpyHostToDevice);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_bM 복사 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMalloc(&d_A, covBytes);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_A 할당 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMemset(d_A, 0, covBytes);                   // 띠 밖 = 0
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_A 초기화 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMalloc(&d_B, covBytes);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_B 할당 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMemset(d_B, 0, covBytes);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_B 초기화 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMalloc(&d_img, WIDTH * HEIGHT * 3);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_img 할당 : " << cudaGetErrorString(err) << std::endl;
+	std::cout << "GPU 메모리 : A, B 각 " << covBytes / (1024 * 1024) << " MB" << std::endl;
+
+	//==================== 1단계 : 정육면체 창 등방 PCA -> A ====================
+	auto pre1Start = std::chrono::high_resolution_clock::now();
+	for (int z = 0; z < VOLZ; z++) {           // z 한 장씩 실행 (한 번에 너무 오래 돌면 윈도우가 GPU를 리셋함)
+		GpuStep1(d_vol, d_A, z, R_KER, SIGMA, SPACING);
+		err = cudaGetLastError();
+		if (err != cudaSuccess) std::cout << "[CUDA 에러] 1단계 z=" << z << " : " << cudaGetErrorString(err) << std::endl;
+	}
+	err = cudaDeviceSynchronize();
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] 1단계 수행 : " << cudaGetErrorString(err) << std::endl;
+	auto pre1End = std::chrono::high_resolution_clock::now();
+	std::cout << "1단계 (R=" << R_KER << ", s=" << SPACING << ") : "
+		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre1End - pre1Start).count() << " ms" << std::endl;
+
+	//==================== 2단계 : n0, rho -> 팬케이크 PCA -> B ====================
+	auto pre2Start = std::chrono::high_resolution_clock::now();
+	for (int z = 0; z < VOLZ; z++) {
+		GpuStep2(d_vol, d_A, d_B, z, SPACING, SIGMA_N, SIGMA_T_MAX, RHO_FALLBACK, RHO_SCALE);
+		err = cudaGetLastError();
+		if (err != cudaSuccess) std::cout << "[CUDA 에러] 2단계 z=" << z << " : " << cudaGetErrorString(err) << std::endl;
+		if (z % 10 == 0) {
+			err = cudaDeviceSynchronize();
+			if (err != cudaSuccess) std::cout << "[CUDA 에러] 2단계 수행 z=" << z << " : " << cudaGetErrorString(err) << std::endl;
+			std::cout << "  2단계 z = " << z << " / " << VOLZ << std::endl;
+		}
+	}
+	err = cudaDeviceSynchronize();
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] 2단계 수행 : " << cudaGetErrorString(err) << std::endl;
+	auto pre2End = std::chrono::high_resolution_clock::now();
+	std::cout << "2단계 (sn=" << SIGMA_N << ", st최대=" << SIGMA_T_MAX << ", rho폴백=" << RHO_FALLBACK
+		<< ", rho척도=" << RHO_SCALE << ") : "
+		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre2End - pre2Start).count() << " ms" << std::endl;
+	//==================== 전처리 끝 ====================
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
 	glEnable(GL_TEXTURE_2D);
-
-	InitTables();
-
-	BenchTableCPU();   // 수정: BuildPreIntegrationTable() 1회 -> 반복 측정
-	cuInit();          // 여기서 alphaTable, colorTable 이 GPU 로 올라간다
-
-	cuBuildPreIntegrationTable();  // 추가: 같은 표를 GPU 로 한 번 더 만든다
-	CompareTables();               // 추가: 두 표가 같은지 숫자로 확인
 }
 
-extern "C" int cumain(float ex, float ey, float ez);
 void MyDisplay() {
 	////////////////카메라 세팅
 	static float t = 0;
 	t += 1.0;
+	glm::vec3 eye(0, 0, 100);   // 비교를 위해 고정iso
+	//glm::vec3 eye(sin(t * 0.1) * 50, 0, 100);
+	cout << glm::to_string(eye) << endl;
 
-#if FIX_CAMERA
-	glm::vec3 eye(0, 0, 100);   // 측정용: 한 자리에 고정
-#else
-	glm::vec3 eye(sin(t * 0.1) * 50, 0, 100);
-#endif
-	//cout << glm::to_string(eye) << endl;   // 측정 중엔 콘솔 출력이 방해가 된다
-
-	//Render(eye);
-	cumain(eye.x, eye.y, eye.z);
-	glTexImage2D(GL_TEXTURE_2D, 0, 3, WIDTH, HEIGHT, 0, GL_RGB,
-		GL_UNSIGNED_BYTE, &MyTexture[0][0][0]);
-
+	Render(eye);
+	static int saved = 0;                       // v0 : 사진은 처음 한 번만 저장
+	if (saved == 0) {
+		SaveBMP("v0.bmp");
+		saved = 1;
+	}
 	glClear(GL_COLOR_BUFFER_BIT);
 	glBegin(GL_QUADS);
 	float fSize = 0.8f;
@@ -539,8 +372,7 @@ int main(int argc, char** argv) {
 	glutCreateWindow("OpenGL Drawing Example");
 	MyInit();
 	glutDisplayFunc(MyDisplay);
-	glutIdleFunc(MyDisplay);
-	glutMainLoop();
-
+	//glutIdleFunc(MyDisplay);
+	glutMainLoop();   // v0 : 창을 띄워 MyDisplay(렌더+저장)가 돌도록
 	return 0;
 }
