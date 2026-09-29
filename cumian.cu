@@ -363,8 +363,8 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 							float wc = (lam[1] - lam[2]) / lam[0];  // 비교 후보 (E1)
 
 							float g = tri;//* wc;//확신 가중 제거(E1)
-							for (int k = 0; k < 6; k++) S[k] += g * (c[k] / tr);//trace=1(크기 맞춤)
-							//for (int k = 0; k < 6; k++) S[k] += g * c[k];
+							//for (int k = 0; k < 6; k++) S[k] += g * (c[k] / tr);//trace=1(크기 맞춤)
+							for (int k = 0; k < 6; k++) S[k] += g * c[k];
 							wsum += g;
 						}
 
