@@ -351,7 +351,7 @@ void MyDisplay() {
 	Render(eye);
 	static int saved = 0;                       // v0 : 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("v1-2_확신 가중 끔 (삼선형만).bmp");
+		SaveBMP("v1-1_순수크기맞춤.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);

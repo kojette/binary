@@ -359,12 +359,9 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 							dEigSorted(c, lam, Vc, o);
 							float tr = c[0] + c[1] + c[2];             // lambda1 + lambda2 + lambda3
 							if (tr <= 0.0f) continue;
-							//float wc = (lam[1] - lam[2]) / tr;         // 확신 w [사용자 결정 Q1]
-							float wc = (lam[1] - lam[2]) / lam[0];  // 비교 후보 (E1)
-
-							float g = tri;//* wc;//확신 가중 제거(E1)
-							//for (int k = 0; k < 6; k++) S[k] += g * (c[k] / tr);//trace=1(크기 맞춤)
-							for (int k = 0; k < 6; k++) S[k] += g * c[k];
+							float wc = (lam[1] - lam[2]) / tr;
+							float g = tri * wc;
+							for (int k = 0; k < 6; k++) S[k] += g * (c[k] / tr);//v1-1(순수 크기 맞춤)
 							wsum += g;
 						}
 
