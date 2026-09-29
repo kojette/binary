@@ -45,6 +45,9 @@ const int   R_KER = 2;                  // 정육면체 커널 반경 : 2, 3, 4 
 const float SIGMA = R_KER / 3.0f;       // 가우시안 폭 (3σ = R)
 const float SPACING = 1.0f;             // 0.5 지점 수집 선 간격 (1 = 문서의 간선 중점). 2*R_KER 이 나누어떨어질 것
 // const int MIN_PTS = 3;               // 최소 점 개수 (비활성)
+// v2_커널 크기 정하기
+const float SIGMA_N = 0.6f;             // 팬케이크 법선 방향 폭(문서 제안값)
+const float SIGMA_T = 4.0f;             // 팬케이크 접선 방향 폭 
 
 //가벼운 함수----------------------------------------------------------
 void FileRead()
@@ -398,6 +401,85 @@ void MyInit() {
 	std::cout << "1단계 PCA 전처리 (R=" << R_KER << ", s=" << SPACING << ") : "
 		<< std::chrono::duration_cast<std::chrono::milliseconds>(preEnd - preStart).count() << " ms" << std::endl;
 	//==================== 1단계 끝 ====================
+	//==================== 2단계 : n0 로 팬케이크 커널 세우기 (크기까지) ====================
+	auto pre2Start = std::chrono::high_resolution_clock::now();
+	const float invSn2 = 1.0f / (SIGMA_N * SIGMA_N);
+	const float invSt2 = 1.0f / (SIGMA_T * SIGMA_T);
+	long long bandCnt = 0, emptyCnt = 0, sumPts = 0;
+	int maxPts = 0;
+	double sumW = 0;
+
+	for (int z = 0; z < VOLZ; z++){
+		if (z % 10 == 0) std::cout << "  2단계 z = " << z << " / " << VOLZ << std::endl;
+		for (int y = 0; y < VOLY; y++)
+			for (int x = 0; x < VOLX; x++) {
+				float n0[3] = { nVol[z][y][x][0], nVol[z][y][x][1], nVol[z][y][x][2] };
+				if (n0[0] * n0[0] + n0[1] * n0[1] + n0[2] * n0[2] < 0.5f) continue;   // 1단계 띠 밖 : 건너뜀
+				bandCnt++;
+				int xq[3] = { x, y, z };
+
+				// --- 3σ 타원체를 딱 덮는 축정렬 상자의 반폭 ---
+				// Σ = σn² n0n0ᵀ + σt² (I - n0n0ᵀ) 의 대각 성분 Σkk = σt² + (σn² - σt²) n0k²
+				float e[3];
+				for (int k = 0; k < 3; k++)
+					e[k] = 3.0f * sqrtf(SIGMA_T * SIGMA_T + (SIGMA_N * SIGMA_N - SIGMA_T * SIGMA_T) * n0[k] * n0[k]);
+
+				float W = 0;
+				int cnt = 0;
+
+				// --- 0.5 지점 수집 : 1단계와 같은 방식, 범위만 상자 e 로 ---
+				for (int a = 0; a < 3; a++) {
+					int b = (a + 1) % 3, c = (a + 2) % 3;
+					int Kb = (int)floorf(e[b] / SPACING);
+					int Kc = (int)floorf(e[c] / SPACING);
+					int i0 = (int)floorf(xq[a] - e[a]);
+					int i1 = (int)floorf(xq[a] + e[a]);
+					for (int ku = -Kb; ku <= Kb; ku++)
+						for (int kv = -Kc; kv <= Kc; kv++) {
+							float u = xq[b] + ku * SPACING;          // 선은 x 기준 격자 정렬
+							float v = xq[c] + kv * SPACING;
+							if (u < 0) continue; if (u >= DIM[b] - 1) continue;
+							if (v < 0) continue; if (v >= DIM[c] - 1) continue;
+
+							for (int i = i0; i <= i1; i++) {         // 셀 [i, i+1]
+								if (i < 0) continue; if (i + 2 > DIM[a] - 1) continue;
+								float q0[3], q1[3];
+								q0[a] = (float)i;     q0[b] = u; q0[c] = v;
+								q1[a] = (float)i + 1; q1[b] = u; q1[c] = v;
+								float f0 = GetDensity(glm::vec3(q0[0], q0[1], q0[2]));
+								float f1 = GetDensity(glm::vec3(q1[0], q1[1], q1[2]));
+								if ((f0 - 0.5f) * (f1 - 0.5f) >= 0.0f) continue;
+
+								float t = (0.5f - f0) / (f1 - f0);
+								float r[3];
+								r[0] = q0[0] - x; r[1] = q0[1] - y; r[2] = q0[2] - z;
+								r[a] += t;
+
+								// --- 마할라노비스 거리 q = (r·n0)²/σn² + |r⊥|²/σt² ---
+								float rn = r[0] * n0[0] + r[1] * n0[1] + r[2] * n0[2];
+								float r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+								float qm = rn * rn * invSn2 + (r2 - rn * rn) * invSt2;
+								if (qm > 9.0f) continue;                  // 3σ 타원체 밖 배제
+
+								W += expf(-0.5f * qm);                     // 팬케이크 가우시안 가중
+								cnt++;
+							}
+						}
+				}
+				if (cnt == 0) emptyCnt++;
+				sumPts += cnt;
+				sumW += W;
+				if (cnt > maxPts) maxPts = cnt;
+			}
+			}
+	auto pre2End = std::chrono::high_resolution_clock::now();
+	std::cout << "2단계 커널 (sn=" << SIGMA_N << ", st=" << SIGMA_T << ") : "
+		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre2End - pre2Start).count() << " ms" << std::endl;
+	std::cout << "  띠 격자점 " << bandCnt << ", 빈 커널 " << emptyCnt
+		<< ", 평균 점 " << (bandCnt ? (double)sumPts / bandCnt : 0.0)
+		<< ", 최대 점 " << maxPts
+		<< ", 평균 W " << (bandCnt ? sumW / bandCnt : 0.0) << std::endl;
+	//==================== 2단계 끝 ====================
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
