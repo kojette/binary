@@ -359,9 +359,11 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 							dEigSorted(c, lam, Vc, o);
 							float tr = c[0] + c[1] + c[2];             // lambda1 + lambda2 + lambda3
 							if (tr <= 0.0f) continue;
-							float wc = (lam[1] - lam[2]) / tr;
+							//float wc = (lam[1] - lam[2]) / tr;                     // v0
+							float wc = (lam[1] - lam[2]) / lam[0];                   // v1-3 : 라이다 평면도
 							float g = tri * wc;
-							for (int k = 0; k < 6; k++) S[k] += g * (c[k] / tr);//v1-1(순수 크기 맞춤)
+							//for (int k = 0; k < 6; k++) S[k] += g * (c[k] / tr);//v1-1(순수 크기 맞춤)
+							for (int k = 0; k < 6; k++) S[k] += g * c[k];            // 크기 맞춤 없음 (v0)
 							wsum += g;
 						}
 
