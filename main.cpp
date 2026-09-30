@@ -62,14 +62,16 @@ unsigned char* d_vol = 0;   // 이진 볼륨
 unsigned char* d_bM = 0;    // 블록 최대값
 float* d_A = 0;             // 1차 공분산 6성분 (xx, yy, zz, xy, xz, yz), 띠 밖 = 0
 float* d_B = 0;             // 2차 공분산 6성분, 띠 밖 = 0
+float* d_Aext = 0;          // A 를 만든 점들의 W, p̄ (4성분) — 합동 공분산용
+float* d_Bext = 0;          // B 를 만든 점들의 W, p̄ (4성분)
 unsigned char* d_img = 0;   // 렌더 결과 RGB
 
 
 // ---- cu 파일의 창구 함수 선언 (커널 실행은 cu 쪽에서) ----
-void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma, float spacing);
-void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z, float spacing,
+void GpuStep1(const unsigned char* d_vol, float* d_A, float* d_Aext, int z, int R, float sigma, float spacing);
+void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, const float* d_Aext, float* d_Bext, int z, float spacing,
 	float sn, float stMax, float rhoFb, float rhoScale);
-void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
+void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, const float* d_Bext, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3]);
 
 //가벼운 함수----------------------------------------------------------
@@ -248,7 +250,7 @@ void Render(glm::vec3 eye) {
 	/////////////////레이캐스팅 : v0 GPU (픽셀 하나 = 스레드 하나)
 	int nPix = WIDTH * HEIGHT;
 	float e3[3] = { eye.x, eye.y, eye.z }, u3[3] = { u.x, u.y, u.z }, v3[3] = { v.x, v.y, v.z }, w3[3] = { w.x, w.y, w.z };
-	GpuRender(d_vol, d_bM, d_B, d_img, e3, u3, v3, w3);
+	GpuRender(d_vol, d_bM, d_B, d_Bext, d_img, e3, u3, v3, w3);
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) std::cout << "[CUDA 에러] 렌더 커널 실행 : " << cudaGetErrorString(err) << std::endl;
 	err = cudaDeviceSynchronize();
@@ -298,6 +300,15 @@ void MyInit() {
 	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_B 할당 : " << cudaGetErrorString(err) << std::endl;
 	err = cudaMemset(d_B, 0, covBytes);
 	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_B 초기화 : " << cudaGetErrorString(err) << std::endl;
+	size_t extBytes = nVox * 4 * sizeof(float);          // W, p̄ : 각 약 225MB
+	err = cudaMalloc(&d_Aext, extBytes);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_Aext 할당 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMemset(d_Aext, 0, extBytes);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_Aext 초기화 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMalloc(&d_Bext, extBytes);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_Bext 할당 : " << cudaGetErrorString(err) << std::endl;
+	err = cudaMemset(d_Bext, 0, extBytes);
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_Bext 초기화 : " << cudaGetErrorString(err) << std::endl;
 	err = cudaMalloc(&d_img, WIDTH * HEIGHT * 3);
 	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_img 할당 : " << cudaGetErrorString(err) << std::endl;
 	std::cout << "GPU 메모리 : A, B 각 " << covBytes / (1024 * 1024) << " MB" << std::endl;
@@ -305,7 +316,7 @@ void MyInit() {
 	//==================== 1단계 : 정육면체 창 등방 PCA -> A ====================
 	auto pre1Start = std::chrono::high_resolution_clock::now();
 	for (int z = 0; z < VOLZ; z++) {           // z 한 장씩 실행 (한 번에 너무 오래 돌면 윈도우가 GPU를 리셋함)
-		GpuStep1(d_vol, d_A, z, R_KER, SIGMA, SPACING);
+		GpuStep1(d_vol, d_A, d_Aext, z, R_KER, SIGMA, SPACING);
 		err = cudaGetLastError();
 		if (err != cudaSuccess) std::cout << "[CUDA 에러] 1단계 z=" << z << " : " << cudaGetErrorString(err) << std::endl;
 	}
@@ -318,7 +329,7 @@ void MyInit() {
 	//==================== 2단계 : n0, rho -> 팬케이크 PCA -> B ====================
 	auto pre2Start = std::chrono::high_resolution_clock::now();
 	for (int z = 0; z < VOLZ; z++) {
-		GpuStep2(d_vol, d_A, d_B, z, SPACING, SIGMA_N, SIGMA_T_MAX, RHO_FALLBACK, RHO_SCALE);
+		GpuStep2(d_vol, d_A, d_B, d_Aext, d_Bext, z, SPACING, SIGMA_N, SIGMA_T_MAX, RHO_FALLBACK, RHO_SCALE);
 		err = cudaGetLastError();
 		if (err != cudaSuccess) std::cout << "[CUDA 에러] 2단계 z=" << z << " : " << cudaGetErrorString(err) << std::endl;
 		if (z % 10 == 0) {
@@ -351,7 +362,7 @@ void MyDisplay() {
 	Render(eye);
 	static int saved = 0;                       // v0 : 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("v1-3_라이다평면도_w=(l2-l3)/l1.bmp");
+		SaveBMP("v2-1_합동공분산.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);
