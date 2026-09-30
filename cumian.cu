@@ -99,7 +99,7 @@ __device__ void dEigSorted(const float* c, float lam[3], float V[3][3], int o[3]
 }
 
 //==================== 1단계 커널 : 격자점 하나 = 스레드 하나, z 한 장씩 ====================
-__global__ void K_Step1(const unsigned char* V, float* Aout, float* Aext, int z, int R, float sigma, float spacing) {
+__global__ void K_Step1(const unsigned char* V, float* Aout, int z, int R, float sigma, float spacing) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
 	int x = id % VOLX, y = id / VOLX;
@@ -156,12 +156,10 @@ __global__ void K_Step1(const unsigned char* V, float* Aout, float* Aext, int z,
 	A[3] = Sxy * iW - px * py;
 	A[4] = Sxz * iW - px * pz;
 	A[5] = Syz * iW - py * pz;
-	float* Ae = Aext + idx * 4;                  // 합동 공분산용 : W, p̄ (상대좌표)
-	Ae[0] = W; Ae[1] = px; Ae[2] = py; Ae[3] = pz;
 }
 
 //==================== 2단계 커널 : 팬케이크 커널 PCA ====================
-__global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, const float* Aext, float* Bext, int z, float spacing,
+__global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, int z, float spacing,
 	float sn, float stMax, float rhoFb, float rhoScale) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
@@ -169,8 +167,6 @@ __global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, c
 	int idx = (z * VOLY + y) * VOLX + x;
 	const float* A = Ain + idx * 6;
 	float* B = Bout + idx * 6;
-	const float* Ae = Aext + idx * 4;
-	float* Be = Bext + idx * 4;
 
 	// --- A 가 0 이면 띠 밖 : 건너뜀 (B = 0 그대로) ---
 	int nonzero = 0;
@@ -195,7 +191,6 @@ __global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, c
 	}
 	if (fallback == 1) {                         // 폴백 : B = A
 		for (int k = 0; k < 6; k++) B[k] = A[k];
-		for (int k = 0; k < 4; k++) Be[k] = Ae[k];   // W, p̄ 도 A 것을 그대로
 		return;
 	}
 
@@ -261,7 +256,6 @@ __global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, c
 	}
 	if (cnt == 0) {                              // 타원체 안 점 없음 : B = A
 		for (int k = 0; k < 6; k++) B[k] = A[k];
-		for (int k = 0; k < 4; k++) Be[k] = Ae[k];   // W, p̄ 도 A 것을 그대로
 		return;
 	}
 
@@ -274,11 +268,10 @@ __global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, c
 	B[3] = Sxy * iW - px * py;
 	B[4] = Sxz * iW - px * pz;
 	B[5] = Syz * iW - py * pz;
-	Be[0] = W; Be[1] = px; Be[2] = py; Be[3] = pz;
 }
 
 //==================== 실시간 커널 : 픽셀 하나 = 스레드 하나 ====================
-__global__ void K_Render(const unsigned char* V, const unsigned char* BM, const float* Bc, const float* Bext, unsigned char* img,
+__global__ void K_Render(const unsigned char* V, const unsigned char* BM, const float* Bc, unsigned char* img,
 	float3 eye3, float3 u3, float3 v3, float3 w3) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= WIDTH * HEIGHT) return;
@@ -349,7 +342,6 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 				float fx = hit[0] - ix, fy = hit[1] - iy, fz = hit[2] - iz;
 				float S[6] = { 0, 0, 0, 0, 0, 0 };
 				float wsum = 0.0f;
-				float Mu[3] = { 0, 0, 0 };                     // 합동 : 무게중심들의 가중합
 				for (int dz = 0; dz < 2; dz++)
 					for (int dy = 0; dy < 2; dy++)
 						for (int dx = 0; dx < 2; dx++) {
@@ -367,38 +359,16 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 							dEigSorted(c, lam, Vc, o);
 							float tr = c[0] + c[1] + c[2];             // lambda1 + lambda2 + lambda3
 							if (tr <= 0.0f) continue;
-							//float wc = (lam[1] - lam[2]) / tr;                     // v0
-							//float wc = (lam[1] - lam[2]) / lam[0];                 // v1-3 : 라이다 평면도
-							//float g = tri * wc;                                    // v0
-							//for (int k = 0; k < 6; k++) S[k] += g * (c[k] / tr);//v1-1(순수 크기 맞춤)
-							//for (int k = 0; k < 6; k++) S[k] += g * c[k];          // v0
-							//wsum += g;                                             // v0
+							float wc = (lam[1] - lam[2]) / tr;         // 확신 w [사용자 결정 Q1]
+							// float wc = (lam[1] - lam[2]) / lam[0];  // 비교 후보 (E1)
 
-							// --- v2-1 합동 공분산 : 8이웃의 원래 점들을 합친 것과 같은 공분산 ---
-							const float* e = Bext + gi * 4;                          // W, p̄
-							float g = tri * e[0];                                    // 삼선형 x 점 가중 합 W
-							float mu[3];                                             // 이웃 무게중심 (교점 기준)
-							mu[0] = (ix + dx) + e[1] - hit[0];
-							mu[1] = (iy + dy) + e[2] - hit[1];
-							mu[2] = (iz + dz) + e[3] - hit[2];
-							S[0] += g * (c[0] + mu[0] * mu[0]);
-							S[1] += g * (c[1] + mu[1] * mu[1]);
-							S[2] += g * (c[2] + mu[2] * mu[2]);
-							S[3] += g * (c[3] + mu[0] * mu[1]);
-							S[4] += g * (c[4] + mu[0] * mu[2]);
-							S[5] += g * (c[5] + mu[1] * mu[2]);
-							Mu[0] += g * mu[0]; Mu[1] += g * mu[1]; Mu[2] += g * mu[2];
+							float g = tri * wc;
+							for (int k = 0; k < 6; k++) S[k] += g * c[k];
 							wsum += g;
 						}
 
 				float N[3];
 				if (wsum > 0.0f) {
-					// --- v2-1 합동 : 평균으로 나눈 뒤 전체 무게중심 빼기 (v0 로 돌릴 땐 이 블록 주석) ---
-					for (int k = 0; k < 6; k++) S[k] /= wsum;
-					float m0 = Mu[0] / wsum, m1 = Mu[1] / wsum, m2 = Mu[2] / wsum;
-					S[0] -= m0 * m0; S[1] -= m1 * m1; S[2] -= m2 * m2;
-					S[3] -= m0 * m1; S[4] -= m0 * m2; S[5] -= m1 * m2;
-
 					float lamS[3], VS[3][3];
 					int oS[3];
 					dEigSorted(S, lamS, VS, oS);
@@ -446,21 +416,21 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 }
 
 //==================== 창구 함수 : cpp 에서 부름 (여기서는 커널 실행만) ====================
-void GpuStep1(const unsigned char* d_vol, float* d_A, float* d_Aext, int z, int R, float sigma, float spacing) {
+void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma, float spacing) {
 	int n = VOLX * VOLY;                        // z 한 장의 격자점 수
-	K_Step1 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_Aext, z, R, sigma, spacing);
+	K_Step1 << <(n + 255) / 256, 256 >> > (d_vol, d_A, z, R, sigma, spacing);
 }
 
-void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, const float* d_Aext, float* d_Bext, int z, float spacing,
+void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z, float spacing,
 	float sn, float stMax, float rhoFb, float rhoScale) {
 	int n = VOLX * VOLY;
-	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, d_Aext, d_Bext, z, spacing, sn, stMax, rhoFb, rhoScale);
+	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, spacing, sn, stMax, rhoFb, rhoScale);
 }
 
-void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, const float* d_Bext, unsigned char* d_img,
+void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3]) {
 	int n = WIDTH * HEIGHT;                     // 픽셀 수
-	K_Render << <(n + 255) / 256, 256 >> > (d_vol, d_bM, d_B, d_Bext, d_img,
+	K_Render << <(n + 255) / 256, 256 >> > (d_vol, d_bM, d_B, d_img,
 		make_float3(eye[0], eye[1], eye[2]), make_float3(u[0], u[1], u[2]),
 		make_float3(v[0], v[1], v[2]), make_float3(w[0], w[1], w[2]));
 }
