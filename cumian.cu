@@ -253,7 +253,7 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 	B[5] = Syz * iW - py * pz;
 }
 
-// 실시간 : 광선 전진 -> 이진 바이섹션 교점 -> 8이웃 2차 공분산을 (확신 x 삼선형) 가중합 -> 최소 고유벡터 법선 -> 조명 (스레드 하나 = 픽셀 하나)
+// 실시간 : 광선 전진 -> 이진 바이섹션 교점 -> 8이웃 2차 공분산을 삼선형 가중합 (확신 없음) -> 최소 고유벡터 법선 -> 조명 (스레드 하나 = 픽셀 하나)
 __global__ void K_Render(const unsigned char* vol, const unsigned char* bM, const float* covB, unsigned char* img,
 	float3 eye3, float3 u3, float3 v3, float3 w3) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -332,14 +332,14 @@ __global__ void K_Render(const unsigned char* vol, const unsigned char* bM, cons
 
 							float tri = ((dx == 1) ? fx : 1 - fx) * ((dy == 1) ? fy : 1 - fy) * ((dz == 1) ? fz : 1 - fz);
 
-							float lam[3], Ec[3][3];
-							int o[3];
-							dEigSorted(c, lam, Ec, o);
+							//float lam[3], Ec[3][3];   // 확신 실험으로 돌아갈 때 이 네 줄을 살리고 g = tri * wc
+							//int o[3];
+							//dEigSorted(c, lam, Ec, o);
+							//float wc = (lam[1] - lam[2]) / tr;   // v0 확신 (tr 줄 다음에 둘 것)
 							float tr = c[0] + c[1] + c[2];
 							if (tr <= 0.0f) continue;
-							float wc = (lam[1] - lam[2]) / tr;
 
-							float g = tri * wc;
+							float g = tri;              // v1-2 : 확신 없음, 삼선형만
 							for (int k = 0; k < 6; k++) S[k] += g * c[k];
 							wsum += g;
 						}

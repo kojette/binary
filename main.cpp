@@ -226,7 +226,7 @@ void MyDisplay() {
 	Render(eye);
 	static int saved = 0;                       // 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("v0_코드정리.bmp");
+		SaveBMP("0_newClear.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);
