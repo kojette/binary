@@ -1,9 +1,8 @@
-﻿// v0 : GPU 쪽 (커널 함수 + 커널을 부르는 얇은 창구 함수)
-// cpp 쪽 MyInit / Render 가 아래 창구 함수(GpuStep1, GpuStep2, GpuRender)를 부른다.
+﻿// GPU 쪽 : 커널 함수 + main.cpp 가 부르는 창구 함수
 #include <cuda_runtime.h>
 #include <math.h>
 
-// ---- cpp 와 반드시 같은 값이어야 하는 상수 (cpp 를 바꾸면 여기도 바꿀 것) ----
+// main.cpp 와 반드시 같은 값 (main.cpp 를 바꾸면 여기도 바꿀 것)
 #define WIDTH   512
 #define HEIGHT  512
 #define VOLX 256
@@ -11,29 +10,32 @@
 #define VOLZ 225
 const int BSIZE = 8;
 const int BSHIFT = 3;
-const int BZ_COUNT = VOLZ / BSIZE + (VOLZ % BSIZE != 0);
 const int BY_COUNT = VOLY / BSIZE + (VOLY % BSIZE != 0);
 const int BX_COUNT = VOLX / BSIZE + (VOLX % BSIZE != 0);
 
-//----------------------------- GPU 쪽 함수 (예외적으로 MyInit 밖) -----------------------------
+// 격자점 (x, y, z) 의 이진값 0 또는 1
+__device__ int dVoxel(const unsigned char* vol, int x, int y, int z) {
+	return vol[(z * VOLY + y) * VOLX + x];
+}
+
 // GetDensity 와 같은 삼선형 보간
-__device__ float dDensity(const unsigned char* V, float px, float py, float pz) {
+__device__ float dDensity(const unsigned char* vol, float px, float py, float pz) {
 	int ix = (int)px, iy = (int)py, iz = (int)pz;
 	float wx = px - ix, wy = py - iy, wz = pz - iz;
 	int i000 = (iz * VOLY + iy) * VOLX + ix;
 	int DX = 1, DY = VOLX, DZ = VOLX * VOLY;
-	float den = V[i000] * (1 - wx) * (1 - wy) * (1 - wz)
-		+ V[i000 + DX] * (wx) * (1 - wy) * (1 - wz)
-		+ V[i000 + DY] * (1 - wx) * (wy) * (1 - wz)
-		+ V[i000 + DX + DY] * (wx) * (wy) * (1 - wz)
-		+ V[i000 + DZ] * (1 - wx) * (1 - wy) * (wz)
-		+V[i000 + DZ + DX] * (wx) * (1 - wy) * (wz)
-		+V[i000 + DZ + DY] * (1 - wx) * (wy) * (wz)
-		+V[i000 + DZ + DX + DY] * (wx) * (wy) * (wz);
+	float den = vol[i000] * (1 - wx) * (1 - wy) * (1 - wz)
+		+ vol[i000 + DX] * (wx) * (1 - wy) * (1 - wz)
+		+ vol[i000 + DY] * (1 - wx) * (wy) * (1 - wz)
+		+ vol[i000 + DX + DY] * (wx) * (wy) * (1 - wz)
+		+ vol[i000 + DZ] * (1 - wx) * (1 - wy) * (wz)
+		+vol[i000 + DZ + DX] * (wx) * (1 - wy) * (wz)
+		+vol[i000 + DZ + DY] * (1 - wx) * (wy) * (wz)
+		+vol[i000 + DZ + DX + DY] * (wx) * (wy) * (wz);
 	return den;
 }
 
-// isOutside 와 같음 (조건을 if 로 나눔)
+// isOutside 와 같음
 __device__ bool dIsOutside(float px, float py, float pz) {
 	if (px >= VOLX - 1) return true;
 	if (px < 0) return true;
@@ -44,18 +46,17 @@ __device__ bool dIsOutside(float px, float py, float pz) {
 	return false;
 }
 
-// Phi 와 같음 : 안쪽 양수, 바깥 음수
-__device__ float dPhi(const unsigned char* V, float px, float py, float pz) {
-	// ISO_LEVEL(0.5) 대신 숫자로 적음 (cpp 쪽 상수라 여기서 안 보임)
+// Phi 와 같음 : 안쪽 양수, 바깥 음수 (0.5 = ISO_LEVEL)
+__device__ float dPhi(const unsigned char* vol, float px, float py, float pz) {
 	if (dIsOutside(px, py, pz)) return 0.0f - 0.5f;
-	return dDensity(V, px, py, pz) - 0.5f;
+	return dDensity(vol, px, py, pz) - 0.5f;
 }
 
-// Jacobi 고유분해 (이전 1단계 코드 그대로). 끝나면 A 대각 = 고윳값, V 열 = 고유벡터
-__device__ void dJacobi(float A[3][3], float V[3][3]) {
+// Jacobi 고유분해 : 끝나면 A 대각 = 고윳값, E 의 열 = 고유벡터
+__device__ void dJacobi(float A[3][3], float E[3][3]) {
 	for (int i = 0; i < 3; i++)
 		for (int j = 0; j < 3; j++)
-			V[i][j] = (i == j) ? 1.0f : 0.0f;
+			E[i][j] = (i == j) ? 1.0f : 0.0f;
 	for (int sweep = 0; sweep < 50; sweep++) {
 		float off = A[0][1] * A[0][1] + A[0][2] * A[0][2] + A[1][2] * A[1][2];
 		if (off < 1e-12f) break;
@@ -65,30 +66,30 @@ __device__ void dJacobi(float A[3][3], float V[3][3]) {
 				float th = (A[q][q] - A[p][p]) / (2.0f * A[p][q]);
 				float tt = ((th >= 0) ? 1.0f : -1.0f) / (fabsf(th) + sqrtf(th * th + 1.0f));
 				float cs = 1.0f / sqrtf(tt * tt + 1.0f), sn = tt * cs;
-				for (int k = 0; k < 3; k++) {          // 열 회전
+				for (int k = 0; k < 3; k++) {
 					float akp = A[k][p], akq = A[k][q];
 					A[k][p] = cs * akp - sn * akq;  A[k][q] = sn * akp + cs * akq;
 				}
-				for (int k = 0; k < 3; k++) {          // 행 회전
+				for (int k = 0; k < 3; k++) {
 					float apk = A[p][k], aqk = A[q][k];
 					A[p][k] = cs * apk - sn * aqk;  A[q][k] = sn * apk + cs * aqk;
 				}
-				for (int k = 0; k < 3; k++) {          // 고유벡터 누적
-					float vkp = V[k][p], vkq = V[k][q];
-					V[k][p] = cs * vkp - sn * vkq;  V[k][q] = sn * vkp + cs * vkq;
+				for (int k = 0; k < 3; k++) {
+					float ekp = E[k][p], ekq = E[k][q];
+					E[k][p] = cs * ekp - sn * ekq;  E[k][q] = sn * ekp + cs * ekq;
 				}
 			}
 	}
 }
 
-// 6성분 c -> 3x3, Jacobi, 큰 순서 번호 o[0] >= o[1] >= o[2]
-__device__ void dEigSorted(const float* c, float lam[3], float V[3][3], int o[3]) {
+// 공분산 6성분 c 의 고유분해 : lam[0] >= lam[1] >= lam[2], o[k] = lam[k] 의 고유벡터가 있는 E 의 열 번호
+__device__ void dEigSorted(const float* c, float lam[3], float E[3][3], int o[3]) {
 	float M[3][3];
 	M[0][0] = c[0]; M[1][1] = c[1]; M[2][2] = c[2];
 	M[0][1] = M[1][0] = c[3];
 	M[0][2] = M[2][0] = c[4];
 	M[1][2] = M[2][1] = c[5];
-	dJacobi(M, V);
+	dJacobi(M, E);
 	float l[3] = { M[0][0], M[1][1], M[2][2] };
 	o[0] = 0; o[1] = 1; o[2] = 2;
 	int tmp;
@@ -98,42 +99,37 @@ __device__ void dEigSorted(const float* c, float lam[3], float V[3][3], int o[3]
 	lam[0] = l[o[0]]; lam[1] = l[o[1]]; lam[2] = l[o[2]];
 }
 
-//==================== 1단계 커널 : 격자점 하나 = 스레드 하나, z 한 장씩 ====================
-__global__ void K_Step1(const unsigned char* V, float* Aout, int z, int R, float sigma, float spacing) {
+// 1단계 : 격자점마다 정육면체 창 안 간선 중점으로 가우시안 가중 PCA -> 1차 공분산 (z 한 장, 스레드 하나 = 격자점 하나)
+__global__ void K_Step1(const unsigned char* vol, float* covA, int z, int R, float sigma) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
 	int x = id % VOLX, y = id / VOLX;
 	int xq[3] = { x, y, z };
 	int DIM[3] = { VOLX, VOLY, VOLZ };
 	float inv2s2 = 1.0f / (2.0f * sigma * sigma);
-	int K = int(2 * R / spacing + 0.5f);   // 창 안 가로 선 개수 - 1
 
 	float W = 0, M[3] = { 0, 0, 0 };
 	float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
 
-	// --- 0.5 지점 수집 : 축 a 방향 선들 (이전 1단계 그대로) ---
 	for (int a = 0; a < 3; a++) {
 		int b = (a + 1) % 3, c = (a + 2) % 3;
-		for (int ku = 0; ku <= K; ku++)
-			for (int kv = 0; kv <= K; kv++) {
-				float u = xq[b] - R + ku * spacing;
-				float v = xq[c] - R + kv * spacing;
-				if (u < 0) continue; if (u >= DIM[b] - 1) continue;
-				if (v < 0) continue; if (v >= DIM[c] - 1) continue;
+		for (int pb = xq[b] - R; pb <= xq[b] + R; pb++)
+			for (int pc = xq[c] - R; pc <= xq[c] + R; pc++) {
+				if (pb < 0) continue; if (pb >= DIM[b] - 1) continue;
+				if (pc < 0) continue; if (pc >= DIM[c] - 1) continue;
 
-				for (int i = xq[a] - R; i < xq[a] + R; i++) {   // 셀 [i, i+1]
+				for (int i = xq[a] - R; i < xq[a] + R; i++) {
 					if (i < 0) continue; if (i + 2 > DIM[a] - 1) continue;
-					float q0[3], q1[3];
-					q0[a] = (float)i;     q0[b] = u; q0[c] = v;
-					q1[a] = (float)i + 1; q1[b] = u; q1[c] = v;
-					float f0 = dDensity(V, q0[0], q0[1], q0[2]);
-					float f1 = dDensity(V, q1[0], q1[1], q1[2]);
-					if ((f0 - 0.5f) * (f1 - 0.5f) >= 0.0f) continue;   // 사이에 0.5 없음
+					int q0[3], q1[3];
+					q0[a] = i;     q0[b] = pb; q0[c] = pc;
+					q1[a] = i + 1; q1[b] = pb; q1[c] = pc;
+					int v0 = dVoxel(vol, q0[0], q0[1], q0[2]);
+					int v1 = dVoxel(vol, q1[0], q1[1], q1[2]);
+					if (v0 + v1 != 1) continue;
 
-					float t = (0.5f - f0) / (f1 - f0);
-					float r[3];                                         // x 기준 상대좌표
-					r[0] = q0[0] - x; r[1] = q0[1] - y; r[2] = q0[2] - z;
-					r[a] += t;
+					float r[3];
+					r[0] = (float)(q0[0] - x); r[1] = (float)(q0[1] - y); r[2] = (float)(q0[2] - z);
+					r[a] += 0.5f;
 
 					float wj = expf(-(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]) * inv2s2);
 					W += wj;
@@ -143,13 +139,11 @@ __global__ void K_Step1(const unsigned char* V, float* Aout, int z, int R, float
 				}
 			}
 	}
-	if (W < 1e-6f) return;                                 // 띠 밖 : A = 0 그대로
+	if (W < 1e-6f) return;
 
-	// --- 가중 무게중심 p̄ 기준 공분산 -> A 에 6성분 저장 ---
 	float iW = 1.0f / W;
 	float px = M[0] * iW, py = M[1] * iW, pz = M[2] * iW;
-	int idx = (z * VOLY + y) * VOLX + x;
-	float* A = Aout + idx * 6;
+	float* A = covA + ((z * VOLY + y) * VOLX + x) * 6;
 	A[0] = Sxx * iW - px * px;
 	A[1] = Syy * iW - py * py;
 	A[2] = Szz * iW - pz * pz;
@@ -158,49 +152,44 @@ __global__ void K_Step1(const unsigned char* V, float* Aout, int z, int R, float
 	A[5] = Syz * iW - py * pz;
 }
 
-//==================== 2단계 커널 : 팬케이크 커널 PCA ====================
-__global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, int z, float spacing,
-	float sn, float stMax, float rhoFb, float rhoScale) {
+// 2단계 : 1차 법선 n0 로 눕힌 3시그마 타원체 안 간선 중점으로 가중 PCA -> 2차 공분산 (z 한 장)
+__global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB, int z,
+	float sn, float stMax, float rhoFallback, float rhoScale) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
 	int x = id % VOLX, y = id / VOLX;
 	int idx = (z * VOLY + y) * VOLX + x;
-	const float* A = Ain + idx * 6;
-	float* B = Bout + idx * 6;
+	const float* A = covA + idx * 6;
+	float* B = covB + idx * 6;
 
-	// --- A 가 0 이면 띠 밖 : 건너뜀 (B = 0 그대로) ---
 	int nonzero = 0;
 	for (int k = 0; k < 6; k++)
 		if (A[k] != 0.0f) nonzero = 1;
 	if (nonzero == 0) return;
 
-	// --- A 고유분해 -> lambda1 >= lambda2 >= lambda3, n0 = lambda3 의 고유벡터 ---
-	float lam[3], Vv[3][3];
+	float lam[3], E[3][3];
 	int o[3];
-	dEigSorted(A, lam, Vv, o);
-	float n0[3] = { Vv[0][o[2]], Vv[1][o[2]], Vv[2][o[2]] };
+	dEigSorted(A, lam, E, o);
+	float n0[3] = { E[0][o[2]], E[1][o[2]], E[2][o[2]] };
 
-	// --- rho = lambda3 / lambda_t,  lambda_t = (lambda1 + lambda2) / 2 ---
 	float lt = (lam[0] + lam[1]) * 0.5f;
 	int fallback = 0;
 	float rho = 0.0f;
-	if (lt <= 0.0f) fallback = 1;                // 점이 한 곳에 몰림 : rho 정의 불가
+	if (lt <= 0.0f) fallback = 1;
 	else {
 		rho = lam[2] / lt;
-		if (rho >= rhoFb) fallback = 1;          // 평면답지 않음
+		if (rho >= rhoFallback) fallback = 1;
 	}
-	if (fallback == 1) {                         // 폴백 : B = A
+	if (fallback == 1) {
 		for (int k = 0; k < 6; k++) B[k] = A[k];
 		return;
 	}
 
-	// --- 미끄럼틀 점수 s -> sigma_t (하한 sigma_n = 공 모양) ---
 	float s = 1.0f / (1.0f + (rho / rhoScale) * (rho / rhoScale));
 	float st = fmaxf(stMax * s, sn);
 	float invSn2 = 1.0f / (sn * sn);
 	float invSt2 = 1.0f / (st * st);
 
-	// --- 3 sigma 타원체를 딱 덮는 축정렬 상자의 반폭 (이전 v2 그대로) ---
 	int xq[3] = { x, y, z };
 	int DIM[3] = { VOLX, VOLY, VOLZ };
 	float e[3];
@@ -211,41 +200,36 @@ __global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, i
 	float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;
 	int cnt = 0;
 
-	// --- 0.5 지점 수집 : 1단계와 같은 방식, 범위만 상자 e 로 (이전 v2 그대로) ---
 	for (int a = 0; a < 3; a++) {
 		int b = (a + 1) % 3, c = (a + 2) % 3;
-		int Kb = (int)floorf(e[b] / spacing);
-		int Kc = (int)floorf(e[c] / spacing);
+		int Kb = (int)floorf(e[b]);
+		int Kc = (int)floorf(e[c]);
 		int i0 = (int)floorf(xq[a] - e[a]);
 		int i1 = (int)floorf(xq[a] + e[a]);
-		for (int ku = -Kb; ku <= Kb; ku++)
-			for (int kv = -Kc; kv <= Kc; kv++) {
-				float u = xq[b] + ku * spacing;          // 선은 x 기준 격자 정렬
-				float v = xq[c] + kv * spacing;
-				if (u < 0) continue; if (u >= DIM[b] - 1) continue;
-				if (v < 0) continue; if (v >= DIM[c] - 1) continue;
+		for (int pb = xq[b] - Kb; pb <= xq[b] + Kb; pb++)
+			for (int pc = xq[c] - Kc; pc <= xq[c] + Kc; pc++) {
+				if (pb < 0) continue; if (pb >= DIM[b] - 1) continue;
+				if (pc < 0) continue; if (pc >= DIM[c] - 1) continue;
 
-				for (int i = i0; i <= i1; i++) {         // 셀 [i, i+1]
+				for (int i = i0; i <= i1; i++) {
 					if (i < 0) continue; if (i + 2 > DIM[a] - 1) continue;
-					float q0[3], q1[3];
-					q0[a] = (float)i;     q0[b] = u; q0[c] = v;
-					q1[a] = (float)i + 1; q1[b] = u; q1[c] = v;
-					float f0 = dDensity(V, q0[0], q0[1], q0[2]);
-					float f1 = dDensity(V, q1[0], q1[1], q1[2]);
-					if ((f0 - 0.5f) * (f1 - 0.5f) >= 0.0f) continue;
+					int q0[3], q1[3];
+					q0[a] = i;     q0[b] = pb; q0[c] = pc;
+					q1[a] = i + 1; q1[b] = pb; q1[c] = pc;
+					int v0 = dVoxel(vol, q0[0], q0[1], q0[2]);
+					int v1 = dVoxel(vol, q1[0], q1[1], q1[2]);
+					if (v0 + v1 != 1) continue;
 
-					float t = (0.5f - f0) / (f1 - f0);
 					float r[3];
-					r[0] = q0[0] - x; r[1] = q0[1] - y; r[2] = q0[2] - z;
-					r[a] += t;
+					r[0] = (float)(q0[0] - x); r[1] = (float)(q0[1] - y); r[2] = (float)(q0[2] - z);
+					r[a] += 0.5f;
 
-					// 마할라노비스 거리 qm = (r.n0)^2/sn^2 + (r.r - (r.n0)^2)/st^2
 					float rn = r[0] * n0[0] + r[1] * n0[1] + r[2] * n0[2];
 					float r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
 					float qm = rn * rn * invSn2 + (r2 - rn * rn) * invSt2;
-					if (qm > 9.0f) continue;              // 3 sigma 타원체 밖 배제
+					if (qm > 9.0f) continue;
 
-					float wj = expf(-0.5f * qm);          // 팬케이크 가우시안 가중
+					float wj = expf(-0.5f * qm);
 					W += wj;
 					M[0] += wj * r[0]; M[1] += wj * r[1]; M[2] += wj * r[2];
 					Sxx += wj * r[0] * r[0]; Syy += wj * r[1] * r[1]; Szz += wj * r[2] * r[2];
@@ -254,12 +238,11 @@ __global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, i
 				}
 			}
 	}
-	if (cnt == 0) {                              // 타원체 안 점 없음 : B = A
+	if (cnt == 0) {
 		for (int k = 0; k < 6; k++) B[k] = A[k];
 		return;
 	}
 
-	// --- 가중 무게중심 p̄ 기준 공분산 -> B ---
 	float iW = 1.0f / W;
 	float px = M[0] * iW, py = M[1] * iW, pz = M[2] * iW;
 	B[0] = Sxx * iW - px * px;
@@ -270,8 +253,8 @@ __global__ void K_Step2(const unsigned char* V, const float* Ain, float* Bout, i
 	B[5] = Syz * iW - py * pz;
 }
 
-//==================== 실시간 커널 : 픽셀 하나 = 스레드 하나 ====================
-__global__ void K_Render(const unsigned char* V, const unsigned char* BM, const float* Bc, unsigned char* img,
+// 실시간 : 광선 전진 -> 이진 바이섹션 교점 -> 8이웃 2차 공분산을 (확신 x 삼선형) 가중합 -> 최소 고유벡터 법선 -> 조명 (스레드 하나 = 픽셀 하나)
+__global__ void K_Render(const unsigned char* vol, const unsigned char* bM, const float* covB, unsigned char* img,
 	float3 eye3, float3 u3, float3 v3, float3 w3) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= WIDTH * HEIGHT) return;
@@ -286,7 +269,6 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 
 	float col[3] = { 0, 0, 0 };
 
-	// --- AABB 박스 체크 (AABB_box_check 와 같음) ---
 	float t1, t2;
 	t1 = -RS[0] / w[0]; t2 = ((VOLX - 1) - RS[0]) / w[0];
 	float xm = fminf(t1, t2), xM = fmaxf(t1, t2);
@@ -300,14 +282,13 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 	if (tm < tM) {
 		const float step = 0.5f;
 		float tBefore = tm;
-		float phiBefore = dPhi(V, RS[0] + w[0] * tm, RS[1] + w[1] * tm, RS[2] + w[2] * tm);
+		float phiBefore = dPhi(vol, RS[0] + w[0] * tm, RS[1] + w[1] * tm, RS[2] + w[2] * tm);
 		for (float t = tm; t < tM; t = t + step) {
 			float p[3] = { RS[0] + w[0] * t, RS[1] + w[1] * t, RS[2] + w[2] * t };
 			if (dIsOutside(p[0], p[1], p[2])) continue;
 
-			// --- 빈 블록 건너뛰기 (블록 번호를 비트 묶음 대신 세 정수로) ---
 			int bx = ((int)p[0]) >> BSHIFT, by = ((int)p[1]) >> BSHIFT, bz = ((int)p[2]) >> BSHIFT;
-			if (BM[(bz * BY_COUNT + by) * BX_COUNT + bx] == 0) {
+			if (bM[(bz * BY_COUNT + by) * BX_COUNT + bx] == 0) {
 				float jump = 0;
 				int nbx, nby, nbz;
 				do {
@@ -318,26 +299,24 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 				} while (nbx == bx && nby == by && nbz == bz);
 				t = t + (jump - step);
 				tBefore = t;
-				phiBefore = dPhi(V, RS[0] + w[0] * t, RS[1] + w[1] * t, RS[2] + w[2] * t);
+				phiBefore = dPhi(vol, RS[0] + w[0] * t, RS[1] + w[1] * t, RS[2] + w[2] * t);
 				continue;
 			}
 
-			float phi = dPhi(V, p[0], p[1], p[2]);
-			if (phiBefore * phi < 0.0f) {                       // 부호 반전 검출
-				// --- 이진 바이섹션 (a = 바깥, b = 안쪽) ---
+			float phi = dPhi(vol, p[0], p[1], p[2]);
+			if (phiBefore * phi < 0.0f) {
 				float a[3] = { RS[0] + w[0] * tBefore, RS[1] + w[1] * tBefore, RS[2] + w[2] * tBefore };
 				float b[3] = { p[0], p[1], p[2] };
-				if (phiBefore > 0.0f) {                          // a 가 안쪽이면 교환
+				if (phiBefore > 0.0f) {
 					for (int k = 0; k < 3; k++) { float tmp = a[k]; a[k] = b[k]; b[k] = tmp; }
 				}
 				for (int it = 0; it < 10; it++) {
 					float m[3] = { (a[0] + b[0]) * 0.5f, (a[1] + b[1]) * 0.5f, (a[2] + b[2]) * 0.5f };
-					if (dPhi(V, m[0], m[1], m[2]) < 0.0f) { a[0] = m[0]; a[1] = m[1]; a[2] = m[2]; }
+					if (dPhi(vol, m[0], m[1], m[2]) < 0.0f) { a[0] = m[0]; a[1] = m[1]; a[2] = m[2]; }
 					else { b[0] = m[0]; b[1] = m[1]; b[2] = m[2]; }
 				}
 				float hit[3] = { (a[0] + b[0]) * 0.5f, (a[1] + b[1]) * 0.5f, (a[2] + b[2]) * 0.5f };
 
-				// --- 법선 : 8이웃 B 를 (확신 w x 삼선형) 가중합 ---
 				int ix = (int)hit[0], iy = (int)hit[1], iz = (int)hit[2];
 				float fx = hit[0] - ix, fy = hit[1] - iy, fz = hit[2] - iz;
 				float S[6] = { 0, 0, 0, 0, 0, 0 };
@@ -345,22 +324,20 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 				for (int dz = 0; dz < 2; dz++)
 					for (int dy = 0; dy < 2; dy++)
 						for (int dx = 0; dx < 2; dx++) {
-							int gi = ((iz + dz) * VOLY + (iy + dy)) * VOLX + (ix + dx);
-							const float* c = Bc + gi * 6;
+							const float* c = covB + (((iz + dz) * VOLY + (iy + dy)) * VOLX + (ix + dx)) * 6;
 							int nonzero = 0;
 							for (int k = 0; k < 6; k++)
 								if (c[k] != 0.0f) nonzero = 1;
-							if (nonzero == 0) continue;               // 띠 밖 격자점
+							if (nonzero == 0) continue;
 
 							float tri = ((dx == 1) ? fx : 1 - fx) * ((dy == 1) ? fy : 1 - fy) * ((dz == 1) ? fz : 1 - fz);
 
-							float lam[3], Vc[3][3];
+							float lam[3], Ec[3][3];
 							int o[3];
-							dEigSorted(c, lam, Vc, o);
-							float tr = c[0] + c[1] + c[2];             // lambda1 + lambda2 + lambda3
+							dEigSorted(c, lam, Ec, o);
+							float tr = c[0] + c[1] + c[2];
 							if (tr <= 0.0f) continue;
-							float wc = (lam[1] - lam[2]) / tr;         // 확신 w [사용자 결정 Q1]
-							// float wc = (lam[1] - lam[2]) / lam[0];  // 비교 후보 (E1)
+							float wc = (lam[1] - lam[2]) / tr;
 
 							float g = tri * wc;
 							for (int k = 0; k < 6; k++) S[k] += g * c[k];
@@ -369,24 +346,22 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 
 				float N[3];
 				if (wsum > 0.0f) {
-					float lamS[3], VS[3][3];
+					float lamS[3], ES[3][3];
 					int oS[3];
-					dEigSorted(S, lamS, VS, oS);
-					N[0] = VS[0][oS[2]]; N[1] = VS[1][oS[2]]; N[2] = VS[2][oS[2]];   // 최소 고유벡터
+					dEigSorted(S, lamS, ES, oS);
+					N[0] = ES[0][oS[2]]; N[1] = ES[1][oS[2]]; N[2] = ES[2][oS[2]];
 				}
-				else {                                           // 폴백 : 중앙차분 (진단용)
-					N[0] = (dDensity(V, hit[0] + 1, hit[1], hit[2]) - dDensity(V, hit[0] - 1, hit[1], hit[2])) * 0.5f;
-					N[1] = (dDensity(V, hit[0], hit[1] + 1, hit[2]) - dDensity(V, hit[0], hit[1] - 1, hit[2])) * 0.5f;
-					N[2] = (dDensity(V, hit[0], hit[1], hit[2] + 1) - dDensity(V, hit[0], hit[1], hit[2] - 1)) * 0.5f;
+				else {
+					N[0] = (dDensity(vol, hit[0] + 1, hit[1], hit[2]) - dDensity(vol, hit[0] - 1, hit[1], hit[2])) * 0.5f;
+					N[1] = (dDensity(vol, hit[0], hit[1] + 1, hit[2]) - dDensity(vol, hit[0], hit[1] - 1, hit[2])) * 0.5f;
+					N[2] = (dDensity(vol, hit[0], hit[1], hit[2] + 1) - dDensity(vol, hit[0], hit[1], hit[2] - 1)) * 0.5f;
 					float len = sqrtf(N[0] * N[0] + N[1] * N[1] + N[2] * N[2]);
 					if (len > 0.0f) { N[0] /= len; N[1] /= len; N[2] /= len; }
 				}
 
-				// --- 앞뒤 : 법선이 카메라(V = -w)를 등지면 반전 ---
 				float Vw[3] = { -w[0], -w[1], -w[2] };
 				if (N[0] * Vw[0] + N[1] * Vw[1] + N[2] * Vw[2] < 0.0f) { N[0] = -N[0]; N[1] = -N[1]; N[2] = -N[2]; }
 
-				// --- 조명 (lighting 과 같음) ---
 				float L[3] = { -w[0], -w[1] + 0.3f, -w[2] };
 				float lenL = sqrtf(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
 				L[0] /= lenL; L[1] /= lenL; L[2] /= lenL;
@@ -415,21 +390,23 @@ __global__ void K_Render(const unsigned char* V, const unsigned char* BM, const 
 	img[id * 3 + 2] = (unsigned char)(int)(col[2] * 255);
 }
 
-//==================== 창구 함수 : cpp 에서 부름 (여기서는 커널 실행만) ====================
-void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma, float spacing) {
-	int n = VOLX * VOLY;                        // z 한 장의 격자점 수
-	K_Step1 << <(n + 255) / 256, 256 >> > (d_vol, d_A, z, R, sigma, spacing);
-}
-
-void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z, float spacing,
-	float sn, float stMax, float rhoFb, float rhoScale) {
+// 1단계 실행 (z 한 장)
+void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma) {
 	int n = VOLX * VOLY;
-	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, spacing, sn, stMax, rhoFb, rhoScale);
+	K_Step1 << <(n + 255) / 256, 256 >> > (d_vol, d_A, z, R, sigma);
 }
 
+// 2단계 실행 (z 한 장)
+void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
+	float sn, float stMax, float rhoFallback, float rhoScale) {
+	int n = VOLX * VOLY;
+	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, sn, stMax, rhoFallback, rhoScale);
+}
+
+// 렌더 실행 (화면 전체)
 void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3]) {
-	int n = WIDTH * HEIGHT;                     // 픽셀 수
+	int n = WIDTH * HEIGHT;
 	K_Render << <(n + 255) / 256, 256 >> > (d_vol, d_bM, d_B, d_img,
 		make_float3(eye[0], eye[1], eye[2]), make_float3(u[0], u[1], u[2]),
 		make_float3(v[0], v[1], v[2]), make_float3(w[0], w[1], w[2]));

@@ -10,7 +10,7 @@
 #include <algorithm>
 // 시간 측정등 고성능 함수
 #include <chrono> 
-#include <cuda_runtime.h>   // v0 : cudaMalloc 등 (커널은 cu 파일)
+#include <cuda_runtime.h>   // cudaMalloc 등 (커널은 cumian.cu)
 
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 800
@@ -41,34 +41,26 @@ unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 using namespace std;
 
 
-//====================================================================
-// v0 : CUDA 대표 파이프라인
-//   전처리 1단계 : 등방 PCA (정육면체 창 R) -> 1차 공분산 A
-//   전처리 2단계 : A 로 n0, rho -> 미끄럼틀로 sigma_t -> 팬케이크 PCA -> 2차 공분산 B
-//   실시간       : 이진 바이섹션 교점 + 8이웃 B 를 (확신 w x 삼선형) 가중합 -> 최소 고유벡터
-//====================================================================
-// 1단계 파라미터 [사용자 결정 R=3]
-const int   R_KER = 2;                  // 정육면체 창 반경
-const float SIGMA =  R_KER / 3.0f;       // 가우시안 폭 (3 sigma = R)
-const float SPACING = 1.0f;             // 0.5 지점 수집 선 간격 (1 = 간선 중점)
-// 2단계 파라미터
-const float SIGMA_N = 0.6f;             // 팬케이크 법선 방향 폭 [문서 제안]
-const float SIGMA_T_MAX = 4.0f;         // 팬케이크 접선 방향 최대 폭 [문서 제안]
-const float RHO_FALLBACK = 0.7f;        // rho 이 이상이면 B = A [Claude 추천 임시]
-const float RHO_SCALE = 0.3f;           // 미끄럼틀 s = 1/(1+(rho/0.3)^2) 의 0.3 [Claude 추천 임시]
+// 1단계 : 등방 PCA
+const int   R_KER = 3;                  // 정육면체 창 반경
+const float SIGMA = R_KER / 3.0f;       // 가우시안 폭 (3 sigma = R)
+// 2단계 : 타원체 PCA
+const float SIGMA_N = 0.6f;             // 법선 방향 폭
+const float SIGMA_T_MAX = 4.0f;         // 표면 방향 최대 폭
+const float RHO_FALLBACK = 0.7f;        // rho 가 이 이상이면 1차 공분산을 그대로 씀
+const float RHO_SCALE = 0.3f;           // 미끄럼틀 s = 1/(1+(rho/RHO_SCALE)^2) 의 척도
 
-// GPU 메모리 (Render 에서도 써야 하므로 전역)
+// GPU 메모리
 unsigned char* d_vol = 0;   // 이진 볼륨
 unsigned char* d_bM = 0;    // 블록 최대값
 float* d_A = 0;             // 1차 공분산 6성분 (xx, yy, zz, xy, xz, yz), 띠 밖 = 0
 float* d_B = 0;             // 2차 공분산 6성분, 띠 밖 = 0
 unsigned char* d_img = 0;   // 렌더 결과 RGB
 
-
-// ---- cu 파일의 창구 함수 선언 (커널 실행은 cu 쪽에서) ----
-void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma, float spacing);
-void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z, float spacing,
-	float sn, float stMax, float rhoFb, float rhoScale);
+// cumian.cu 의 창구 함수
+void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma);
+void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
+	float sn, float stMax, float rhoFallback, float rhoScale);
 void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3]);
 
@@ -202,7 +194,8 @@ glm::vec3 lighting(const glm::vec3& p, const glm::vec3& rgb, const glm::vec3& w)
 	return clamp(I, 0.0f, 1.0f);
 }
 
-void SaveBMP(const char* filename) {//사진 저장(v1)
+// 사진 저장 (BMP)
+void SaveBMP(const char* filename) {
 	int pad = (4 - (WIDTH * 3) % 4) % 4;
 	int dataSize = (WIDTH * 3 + pad) * HEIGHT;
 	int fileSize = 54 + dataSize;
@@ -234,6 +227,11 @@ void SaveBMP(const char* filename) {//사진 저장(v1)
 	std::cout << "saved : " << filename << std::endl;
 }
 
+// CUDA 에러가 있으면 출력
+void CudaCheck(cudaError_t err, const char* what) {
+	if (err != cudaSuccess) std::cout << "[CUDA 에러] " << what << " : " << cudaGetErrorString(err) << std::endl;
+}
+
 void Render(glm::vec3 eye) {
 	using namespace glm;
 
@@ -245,17 +243,12 @@ void Render(glm::vec3 eye) {
 	glm::vec3 v = glm::normalize(glm::cross(w, u));
 
 	auto start = std::chrono::high_resolution_clock::now();
-	/////////////////레이캐스팅 : v0 GPU (픽셀 하나 = 스레드 하나)
 	int nPix = WIDTH * HEIGHT;
 	float e3[3] = { eye.x, eye.y, eye.z }, u3[3] = { u.x, u.y, u.z }, v3[3] = { v.x, v.y, v.z }, w3[3] = { w.x, w.y, w.z };
 	GpuRender(d_vol, d_bM, d_B, d_img, e3, u3, v3, w3);
-	cudaError_t err = cudaGetLastError();
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] 렌더 커널 실행 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaDeviceSynchronize();
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] 렌더 커널 수행 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMemcpy(&MyTexture[0][0][0], d_img, nPix * 3, cudaMemcpyDeviceToHost);
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] 이미지 복사 : " << cudaGetErrorString(err) << std::endl;
-
+	CudaCheck(cudaGetLastError(), "렌더 실행");
+	CudaCheck(cudaDeviceSynchronize(), "렌더 수행");
+	CudaCheck(cudaMemcpy(&MyTexture[0][0][0], d_img, nPix * 3, cudaMemcpyDeviceToHost), "이미지 복사");
 	auto end = std::chrono::high_resolution_clock::now();
 	auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 	std::cout << "실행 시간: " << duration.count() * 0.001f << " ms" << std::endl;
@@ -277,63 +270,47 @@ void MyInit() {
 	//--------------------------------------------------------------------
 
 	GenBlocks(); // 파일은 읽고 난 다음에.
-
-	//==================== v0 : GPU 메모리 준비 ====================
-	cudaError_t err;
+	//==================== GPU 메모리 준비 ====================
 	size_t nVox = (size_t)VOLX * VOLY * VOLZ;
-	size_t covBytes = nVox * 6 * sizeof(float);          // A, B 각각 약 354MB
-	err = cudaMalloc(&d_vol, nVox);
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_vol 할당 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMemcpy(d_vol, vol, nVox, cudaMemcpyHostToDevice);
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_vol 복사 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMalloc(&d_bM, sizeof(bM));
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_bM 할당 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMemcpy(d_bM, bM, sizeof(bM), cudaMemcpyHostToDevice);
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_bM 복사 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMalloc(&d_A, covBytes);
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_A 할당 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMemset(d_A, 0, covBytes);                   // 띠 밖 = 0
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_A 초기화 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMalloc(&d_B, covBytes);
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_B 할당 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMemset(d_B, 0, covBytes);
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_B 초기화 : " << cudaGetErrorString(err) << std::endl;
-	err = cudaMalloc(&d_img, WIDTH * HEIGHT * 3);
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] d_img 할당 : " << cudaGetErrorString(err) << std::endl;
+	size_t covBytes = nVox * 6 * sizeof(float);
+	CudaCheck(cudaMalloc(&d_vol, nVox), "d_vol 할당");
+	CudaCheck(cudaMemcpy(d_vol, vol, nVox, cudaMemcpyHostToDevice), "d_vol 복사");
+	CudaCheck(cudaMalloc(&d_bM, sizeof(bM)), "d_bM 할당");
+	CudaCheck(cudaMemcpy(d_bM, bM, sizeof(bM), cudaMemcpyHostToDevice), "d_bM 복사");
+	CudaCheck(cudaMalloc(&d_A, covBytes), "d_A 할당");
+	CudaCheck(cudaMemset(d_A, 0, covBytes), "d_A 초기화");
+	CudaCheck(cudaMalloc(&d_B, covBytes), "d_B 할당");
+	CudaCheck(cudaMemset(d_B, 0, covBytes), "d_B 초기화");
+	CudaCheck(cudaMalloc(&d_img, WIDTH * HEIGHT * 3), "d_img 할당");
 	std::cout << "GPU 메모리 : A, B 각 " << covBytes / (1024 * 1024) << " MB" << std::endl;
 
-	//==================== 1단계 : 정육면체 창 등방 PCA -> A ====================
+	//==================== 1단계 : 등방 PCA -> A ====================
 	auto pre1Start = std::chrono::high_resolution_clock::now();
-	for (int z = 0; z < VOLZ; z++) {           // z 한 장씩 실행 (한 번에 너무 오래 돌면 윈도우가 GPU를 리셋함)
-		GpuStep1(d_vol, d_A, z, R_KER, SIGMA, SPACING);
-		err = cudaGetLastError();
-		if (err != cudaSuccess) std::cout << "[CUDA 에러] 1단계 z=" << z << " : " << cudaGetErrorString(err) << std::endl;
+	for (int z = 0; z < VOLZ; z++) {           // z 한 장씩 (한 번에 너무 오래 돌면 윈도우가 GPU를 리셋함)
+		GpuStep1(d_vol, d_A, z, R_KER, SIGMA);
+		CudaCheck(cudaGetLastError(), "1단계 실행");
 	}
-	err = cudaDeviceSynchronize();
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] 1단계 수행 : " << cudaGetErrorString(err) << std::endl;
+	CudaCheck(cudaDeviceSynchronize(), "1단계 수행");
 	auto pre1End = std::chrono::high_resolution_clock::now();
-	std::cout << "1단계 (R=" << R_KER << ", s=" << SPACING << ") : "
+	std::cout << "1단계 (R=" << R_KER << ") : "
 		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre1End - pre1Start).count() << " ms" << std::endl;
 
-	//==================== 2단계 : n0, rho -> 팬케이크 PCA -> B ====================
+	//==================== 2단계 : 타원체 PCA -> B ====================
 	auto pre2Start = std::chrono::high_resolution_clock::now();
 	for (int z = 0; z < VOLZ; z++) {
-		GpuStep2(d_vol, d_A, d_B, z, SPACING, SIGMA_N, SIGMA_T_MAX, RHO_FALLBACK, RHO_SCALE);
-		err = cudaGetLastError();
-		if (err != cudaSuccess) std::cout << "[CUDA 에러] 2단계 z=" << z << " : " << cudaGetErrorString(err) << std::endl;
+		GpuStep2(d_vol, d_A, d_B, z, SIGMA_N, SIGMA_T_MAX, RHO_FALLBACK, RHO_SCALE);
+		CudaCheck(cudaGetLastError(), "2단계 실행");
 		if (z % 10 == 0) {
-			err = cudaDeviceSynchronize();
-			if (err != cudaSuccess) std::cout << "[CUDA 에러] 2단계 수행 z=" << z << " : " << cudaGetErrorString(err) << std::endl;
+			CudaCheck(cudaDeviceSynchronize(), "2단계 수행");
 			std::cout << "  2단계 z = " << z << " / " << VOLZ << std::endl;
 		}
 	}
-	err = cudaDeviceSynchronize();
-	if (err != cudaSuccess) std::cout << "[CUDA 에러] 2단계 수행 : " << cudaGetErrorString(err) << std::endl;
+	CudaCheck(cudaDeviceSynchronize(), "2단계 수행");
 	auto pre2End = std::chrono::high_resolution_clock::now();
 	std::cout << "2단계 (sn=" << SIGMA_N << ", st최대=" << SIGMA_T_MAX << ", rho폴백=" << RHO_FALLBACK
 		<< ", rho척도=" << RHO_SCALE << ") : "
 		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre2End - pre2Start).count() << " ms" << std::endl;
-	//==================== 전처리 끝 ====================
+
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
@@ -349,9 +326,9 @@ void MyDisplay() {
 	cout << glm::to_string(eye) << endl;
 
 	Render(eye);
-	static int saved = 0;                       // v0 : 사진은 처음 한 번만 저장
+	static int saved = 0;                       // 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("v2_R2_시그마미고정.bmp");
+		SaveBMP("v0_코드정리.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);
@@ -373,6 +350,6 @@ int main(int argc, char** argv) {
 	MyInit();
 	glutDisplayFunc(MyDisplay);
 	//glutIdleFunc(MyDisplay);
-	glutMainLoop();   // v0 : 창을 띄워 MyDisplay(렌더+저장)가 돌도록
+	glutMainLoop();   // 창을 띄워 MyDisplay(렌더+저장)가 돌도록
 	return 0;
 }
