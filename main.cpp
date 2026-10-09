@@ -161,17 +161,15 @@ void MyInit() {
 	glClearColor(0.0, 0.0, 0.0, 0.0);
 	FileRead();
 
-
-	// 이진화 전처리. 반드시 GenBlocks() 보다 먼저 와야 한다.
-	for (int z = 0; z < VOLZ; z++)
+	for (int z = 0; z < VOLZ; z++)// 이진화.
 		for (int y = 0; y < VOLY; y++)
 			for (int x = 0; x < VOLX; x++)
 				vol[z][y][x] = (vol[z][y][x] >= ISO);
 	printf("binarized (ISO = %d, inside : d >= ISO)\n", ISO);
-	//--------------------------------------------------------------------
 
-	GenBlocks(); // 파일은 읽고 난 다음에.
-	//==================== GPU 메모리 준비 ====================
+	GenBlocks(); // 블록별 최대값
+
+	//GPU 메모리 준비
 	size_t nVox = (size_t)VOLX * VOLY * VOLZ;
 	size_t covBytes = nVox * 6 * sizeof(float);
 	CudaCheck(cudaMalloc(&d_vol, nVox), "d_vol 할당");
@@ -185,9 +183,9 @@ void MyInit() {
 	CudaCheck(cudaMalloc(&d_img, WIDTH * HEIGHT * 3), "d_img 할당");
 	std::cout << "GPU 메모리 : A, B 각 " << covBytes / (1024 * 1024) << " MB" << std::endl;
 
-	//==================== 1단계 : 등방 PCA -> A ====================
+	//==================== 1단계 : 등방 PCA -> 1차 공분산 ====================
 	auto pre1Start = std::chrono::high_resolution_clock::now();
-	for (int z = 0; z < VOLZ; z++) {           // z 한 장씩 (한 번에 너무 오래 돌면 윈도우가 GPU를 리셋함)
+	for (int z = 0; z < VOLZ; z++) {           // xy면 한 장씩.
 		GpuStep1(d_vol, d_A, z, R_KER, SIGMA);
 		CudaCheck(cudaGetLastError(), "1단계 실행");
 	}
@@ -196,7 +194,7 @@ void MyInit() {
 	std::cout << "1단계 (R=" << R_KER << ") : "
 		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre1End - pre1Start).count() << " ms" << std::endl;
 
-	//==================== 2단계 : 타원체 PCA -> B ====================
+	//==================== 2단계 : 타원체 PCA -> 2차 공분산 ====================
 	auto pre2Start = std::chrono::high_resolution_clock::now();
 	for (int z = 0; z < VOLZ; z++) {
 		GpuStep2(d_vol, d_A, d_B, z, SIGMA_N, SIGMA_T_MAX, RHO_FALLBACK, RHO_SCALE);
@@ -225,7 +223,7 @@ void MyDisplay() {
 	Render(eye);
 	static int saved = 0;                       // 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("0_newClear.bmp");
+		SaveBMP("(2차)_2차 전처리_C.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);
