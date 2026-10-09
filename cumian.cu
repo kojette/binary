@@ -185,8 +185,9 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 		return;
 	}
 
-	float s = 1.0f / (1.0f + (rho / rhoScale) * (rho / rhoScale));
-	float st = fmaxf(stMax * s, sn);
+	//float s = 1.0f / (1.0f + (rho / rhoScale) * (rho / rhoScale));
+	//float st = fmaxf(stMax * s, sn);
+	float st = stMax;
 	float invSn2 = 1.0f / (sn * sn);
 	float invSt2 = 1.0f / (st * st);
 
@@ -331,11 +332,6 @@ __global__ void K_Render(const unsigned char* vol, const unsigned char* bM, cons
 							if (nonzero == 0) continue;
 
 							float tri = ((dx == 1) ? fx : 1 - fx) * ((dy == 1) ? fy : 1 - fy) * ((dz == 1) ? fz : 1 - fz);
-
-							//float lam[3], Ec[3][3];   // 확신 실험으로 돌아갈 때 이 네 줄을 살리고 g = tri * wc
-							//int o[3];
-							//dEigSorted(c, lam, Ec, o);
-							//float wc = (lam[1] - lam[2]) / tr;   // v0 확신 (tr 줄 다음에 둘 것)
 							float tr = c[0] + c[1] + c[2];
 							if (tr <= 0.0f) continue;
 

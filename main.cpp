@@ -219,7 +219,6 @@ void MyInit() {
 }
 
 void MyDisplay() {
-	////////////////카메라 세팅
 	glm::vec3 eye(0, 0, 100);   // 비교를 위해 고정
 	cout << glm::to_string(eye) << endl;
 
