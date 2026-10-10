@@ -223,7 +223,7 @@ void MyDisplay() {
 	Render(eye);
 	static int saved = 0;                       // 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("(2차)_2차 전처리_C.bmp");
+		SaveBMP("(2차)_2차 전처리_D_폴백제거_인덱스수정.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);

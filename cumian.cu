@@ -115,11 +115,11 @@ __global__ void K_Step1(const unsigned char* vol, float* covA, int z, int R, flo
 		int b = (a + 1) % 3, c = (a + 2) % 3;
 		for (int pb = xq[b] - R; pb <= xq[b] + R; pb++)
 			for (int pc = xq[c] - R; pc <= xq[c] + R; pc++) {
-				if (pb < 0) continue; if (pb >= DIM[b] - 1) continue;
-				if (pc < 0) continue; if (pc >= DIM[c] - 1) continue;
+				if (pb < 0) continue; if (pb > DIM[b] - 1) continue;
+				if (pc < 0) continue; if (pc > DIM[c] - 1) continue;
 
 				for (int i = xq[a] - R; i < xq[a] + R; i++) {
-					if (i < 0) continue; if (i + 2 > DIM[a] - 1) continue;
+					if (i < 0) continue; if (i + 1 > DIM[a] - 1) continue;
 					int q0[3], q1[3];
 					q0[a] = i;     q0[b] = pb; q0[c] = pc;
 					q1[a] = i + 1; q1[b] = pb; q1[c] = pc;
@@ -239,10 +239,10 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 				}
 			}
 	}
-	if (cnt == 0) {
+	/*if (cnt == 0) {
 		for (int k = 0; k < 6; k++) B[k] = A[k];
 		return;
-	}
+	}*/
 
 	float iW = 1.0f / W;
 	float px = M[0] * iW, py = M[1] * iW, pz = M[2] * iW;
