@@ -39,16 +39,18 @@ unsigned char vol[VOLZ][VOLY][VOLX];
 unsigned char bM[BZ_COUNT][BY_COUNT][BX_COUNT];
 
 using namespace std;
-
-
 // 1단계 : 등방 PCA
-const int   R_KER = 3;                  // 정육면체 창 반경
-const float SIGMA = R_KER / 3.0f;       // 가우시안 폭 (3 sigma = R)
+//const int   R_KER = 3;                  // 정육면체 창 반경
+//const float SIGMA = R_KER / 3.0f;       // 가우시안 폭 (3 sigma = R)
+const float SIGMA = 1.2f;                          // 가우시안 폭 (실험 변수)
+const int   R_KER = (int)(3.0f * SIGMA + 0.999f);  // 창 반경 = 3σ 올림
 // 2단계 : 타원체 PCA
 const float SIGMA_N = 0.6f;             // 법선 방향 폭
 const float SIGMA_T_MAX = 4.0f;         // 표면 방향 최대 폭
 const float RHO_FALLBACK = 0.7f;        // rho 가 이 이상이면 1차 공분산을 그대로 씀
 const float RHO_SCALE = 0.3f;           // 미끄럼틀 s = 1/(1+(rho/RHO_SCALE)^2) 의 척도
+// [계측]
+const int FALSE_COLOR = 1;              // 가색 1 켬, 0 끔 (끄면 사진이 계측 전과 비트 단위로 같아야 함)
 
 // GPU 메모리
 unsigned char* d_vol = 0;   // 이진 볼륨
@@ -56,12 +58,15 @@ unsigned char* d_bM = 0;    // 블록 최대값
 float* d_A = 0;             // 1차 공분산 6성분 (xx, yy, zz, xy, xz, yz), 띠 밖 = 0
 float* d_B = 0;             // 2차 공분산 6성분, 띠 밖 = 0
 unsigned char* d_img = 0;   // 렌더 결과 RGB
+unsigned char* d_F = 0;     // [계측] 2단계 갈래 : 0 띠 밖, 1 정상, 2 lt<=0, 3 rho>=0.7, 4 점 0개
+unsigned char* d_R = 0;     // [계측] 렌더가 8 꼭짓점으로 읽은 격자점 = 1
 
-// cumian.cu 의 창구 함수
+// cumian.cu 의 창구 함수 
 void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma);
-void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
+void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, unsigned char* d_F, int z,
 	float sn, float stMax, float rhoFallback, float rhoScale);
-void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
+void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B,
+	const unsigned char* d_F, unsigned char* d_R, int falseColor, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3]);
 
 //가벼운 함수----------------------------------------------------------
@@ -146,7 +151,7 @@ void Render(glm::vec3 eye) {
 	auto start = std::chrono::high_resolution_clock::now();
 	int nPix = WIDTH * HEIGHT;
 	float e3[3] = { eye.x, eye.y, eye.z }, u3[3] = { u.x, u.y, u.z }, v3[3] = { v.x, v.y, v.z }, w3[3] = { w.x, w.y, w.z };
-	GpuRender(d_vol, d_bM, d_B, d_img, e3, u3, v3, w3);
+	GpuRender(d_vol, d_bM, d_B, d_F, d_R, FALSE_COLOR, d_img, e3, u3, v3, w3);
 	CudaCheck(cudaGetLastError(), "렌더 실행");
 	CudaCheck(cudaDeviceSynchronize(), "렌더 수행");
 	CudaCheck(cudaMemcpy(&MyTexture[0][0][0], d_img, nPix * 3, cudaMemcpyDeviceToHost), "이미지 복사");
@@ -155,6 +160,30 @@ void Render(glm::vec3 eye) {
 	std::cout << "실행 시간: " << duration.count() * 0.001f << " ms" << std::endl;
 	glTexImage2D(GL_TEXTURE_2D, 0, 3, WIDTH, HEIGHT, 0, GL_RGB,
 		GL_UNSIGNED_BYTE, &MyTexture[0][0][0]);
+}
+
+// [계측] 2단계 갈래 표시(F)와 렌더가 읽은 꼭짓점(R)을 CPU로 가져와 갈래별 개수 출력
+// 한 격자점은 갈래를 하나만 타므로 2~4 를 더한 값 = 특이 케이스 합집합
+void CountFlags() {
+	size_t nVox = (size_t)VOLX * VOLY * VOLZ;
+	unsigned char* hF = new unsigned char[nVox];
+	unsigned char* hR = new unsigned char[nVox];
+	CudaCheck(cudaMemcpy(hF, d_F, nVox, cudaMemcpyDeviceToHost), "F 복사");
+	CudaCheck(cudaMemcpy(hR, d_R, nVox, cudaMemcpyDeviceToHost), "R 복사");
+	long long band[5] = { 0, 0, 0, 0, 0 };   // 볼륨 전체, 갈래별 개수
+	long long read[5] = { 0, 0, 0, 0, 0 };   // 렌더가 읽은 꼭짓점, 갈래별 개수
+	for (size_t i = 0; i < nVox; i++) {
+		band[hF[i]]++;
+		if (hR[i] == 1) read[hF[i]]++;
+	}
+	const char* name[5] = { "0 띠 밖", "1 정상", "2 lt<=0", "3 rho>=0.7 (B)", "4 점 0개 (D)" };
+	std::cout << "---------- [계측] 2단계 갈래 ----------" << std::endl;
+	for (int k = 0; k < 5; k++)
+		std::cout << name[k] << " : 전체 " << band[k] << " / 렌더가 읽음 " << read[k] << std::endl;
+	std::cout << "특이 합집합 (2~4) : 전체 " << band[2] + band[3] + band[4]
+		<< " / 렌더가 읽음 " << read[2] + read[3] + read[4] << std::endl;
+	delete[] hF;
+	delete[] hR;
 }
 
 void MyInit() {
@@ -182,6 +211,10 @@ void MyInit() {
 	CudaCheck(cudaMemset(d_B, 0, covBytes), "d_B 초기화");
 	CudaCheck(cudaMalloc(&d_img, WIDTH * HEIGHT * 3), "d_img 할당");
 	std::cout << "GPU 메모리 : A, B 각 " << covBytes / (1024 * 1024) << " MB" << std::endl;
+	CudaCheck(cudaMalloc(&d_F, nVox), "d_F 할당");          // [계측]
+	CudaCheck(cudaMemset(d_F, 0, nVox), "d_F 초기화");
+	CudaCheck(cudaMalloc(&d_R, nVox), "d_R 할당");          // [계측]
+	CudaCheck(cudaMemset(d_R, 0, nVox), "d_R 초기화");
 
 	//==================== 1단계 : 등방 PCA -> 1차 공분산 ====================
 	auto pre1Start = std::chrono::high_resolution_clock::now();
@@ -197,7 +230,7 @@ void MyInit() {
 	//==================== 2단계 : 타원체 PCA -> 2차 공분산 ====================
 	auto pre2Start = std::chrono::high_resolution_clock::now();
 	for (int z = 0; z < VOLZ; z++) {
-		GpuStep2(d_vol, d_A, d_B, z, SIGMA_N, SIGMA_T_MAX, RHO_FALLBACK, RHO_SCALE);
+		GpuStep2(d_vol, d_A, d_B, d_F, z, SIGMA_N, SIGMA_T_MAX, RHO_FALLBACK, RHO_SCALE);
 		CudaCheck(cudaGetLastError(), "2단계 실행");
 		if (z % 10 == 0) {
 			CudaCheck(cudaDeviceSynchronize(), "2단계 수행");
@@ -217,13 +250,15 @@ void MyInit() {
 }
 
 void MyDisplay() {
-	glm::vec3 eye(0, 0, 100);   // 비교를 위해 고정
+	glm::vec3 eye(0,0,100);   // 비교를 위해 고정
 	cout << glm::to_string(eye) << endl;
 
 	Render(eye);
 	static int saved = 0;                       // 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("(2차)_2차 전처리_D_폴백제거_인덱스수정.bmp");
+		if (FALSE_COLOR == 1) SaveBMP("(2차)_2차 전처리_계측_가색_시그마조정_B분기끔.bmp");
+		else SaveBMP("(2차)_2차 전처리_계측_가색끔_시그마조정_B분기끔.bmp");
+		CountFlags();                           // [계측] 갈래별 개수 콘솔 출력 (첫 회만)
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);

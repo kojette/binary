@@ -153,7 +153,7 @@ __global__ void K_Step1(const unsigned char* vol, float* covA, int z, int R, flo
 }
 
 // 2단계 : 1차 법선 n0 로 눕힌 3시그마 타원체 안 간선 중점으로 가중 PCA -> 2차 공분산 (z 한 장)
-__global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB, int z,
+__global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB, unsigned char* F, int z,
 	float sn, float stMax, float rhoFallback, float rhoScale) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
@@ -171,7 +171,7 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 	int o[3];
 	dEigSorted(A, lam, E, o);
 	float n0[3] = { E[0][o[2]], E[1][o[2]], E[2][o[2]] };
-
+	 
 	float lt = (lam[0] + lam[1]) * 0.5f;
 	int fallback = 0;
 	float rho = 0.0f;
@@ -180,10 +180,12 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 		rho = lam[2] / lt;
 		if (rho >= rhoFallback) fallback = 1;
 	}
-	if (fallback == 1) {
-		for (int k = 0; k < 6; k++) B[k] = A[k];
-		return;
-	}
+	//if (fallback == 1) {
+	//	if (lt <= 0.0f) F[idx] = 2;           // [계측] lt<=0
+	//	else F[idx] = 3;                      // [계측] rho>=0.7 (B)
+	//	for (int k = 0; k < 6; k++) B[k] = A[k];
+	//	return;
+	//}
 
 	//float s = 1.0f / (1.0f + (rho / rhoScale) * (rho / rhoScale));
 	//float st = fmaxf(stMax * s, sn);
@@ -239,6 +241,8 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 				}
 			}
 	}
+	if (cnt == 0) F[idx] = 4;                // [계측] 점 0개 (D)
+	else F[idx] = 1;                         // [계측] 정상
 	/*if (cnt == 0) {
 		for (int k = 0; k < 6; k++) B[k] = A[k];
 		return;
@@ -255,7 +259,8 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 }
 
 // 실시간 : 광선 전진 -> 이진 바이섹션 교점 -> 8이웃 2차 공분산을 삼선형 가중합 (확신 없음) -> 최소 고유벡터 법선 -> 조명 (스레드 하나 = 픽셀 하나)
-__global__ void K_Render(const unsigned char* vol, const unsigned char* bM, const float* covB, unsigned char* img,
+__global__ void K_Render(const unsigned char* vol, const unsigned char* bM, const float* covB,
+	const unsigned char* F, unsigned char* Rd, int falseColor, unsigned char* img,
 	float3 eye3, float3 u3, float3 v3, float3 w3) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= WIDTH * HEIGHT) return;
@@ -322,10 +327,14 @@ __global__ void K_Render(const unsigned char* vol, const unsigned char* bM, cons
 				float fx = hit[0] - ix, fy = hit[1] - iy, fz = hit[2] - iz;
 				float S[6] = { 0, 0, 0, 0, 0, 0 };
 				float wsum = 0.0f;
+				int flagMax = 0;                             // [계측] 8 꼭짓점 중 가장 큰 갈래 번호
 				for (int dz = 0; dz < 2; dz++)
 					for (int dy = 0; dy < 2; dy++)
 						for (int dx = 0; dx < 2; dx++) {
 							const float* c = covB + (((iz + dz) * VOLY + (iy + dy)) * VOLX + (ix + dx)) * 6;
+							int cidx = ((iz + dz) * VOLY + (iy + dy)) * VOLX + (ix + dx);   // [계측]
+							Rd[cidx] = 1;                            // [계측] 렌더가 읽음
+							if (F[cidx] > flagMax) flagMax = F[cidx];   // [계측] 가장 큰 갈래 번호
 							int nonzero = 0;
 							for (int k = 0; k < 6; k++)
 								if (c[k] != 0.0f) nonzero = 1;
@@ -375,6 +384,16 @@ __global__ void K_Render(const unsigned char* vol, const unsigned char* bM, cons
 					float I = Ia * rgb[k] * 0.8f + Id * rgb[k] * NL + Is * Ks[k] * spec;
 					col[k] = fminf(fmaxf(I, 0.0f), 1.0f);
 				}
+				// [계측] 가색 : 8 꼭짓점 중 가장 큰 갈래 번호로 색을 반쯤 섞음
+				if (falseColor == 1) {
+					if (flagMax >= 2) {
+						float tint[3] = { 0, 0, 0 };
+						if (flagMax == 2) tint[1] = 1.0f;   // lt<=0      초록
+						if (flagMax == 3) tint[0] = 1.0f;   // rho>=0.7   빨강 (B)
+						if (flagMax == 4) tint[2] = 1.0f;   // 점 0개     파랑 (D)
+						for (int k = 0; k < 3; k++) col[k] = 0.5f * col[k] + 0.5f * tint[k];
+					}
+				}
 				break;
 			}
 			tBefore = t;
@@ -393,17 +412,18 @@ void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma)
 }
 
 // 2단계 실행 (z 한 장)
-void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
+void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, unsigned char* d_F, int z,
 	float sn, float stMax, float rhoFallback, float rhoScale) {
 	int n = VOLX * VOLY;
-	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, sn, stMax, rhoFallback, rhoScale);
+	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, d_F, z, sn, stMax, rhoFallback, rhoScale);
 }
 
 // 렌더 실행 (화면 전체)
-void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
+void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B,
+	const unsigned char* d_F, unsigned char* d_R, int falseColor, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3]) {
 	int n = WIDTH * HEIGHT;
-	K_Render << <(n + 255) / 256, 256 >> > (d_vol, d_bM, d_B, d_img,
+	K_Render << <(n + 255) / 256, 256 >> > (d_vol, d_bM, d_B, d_F, d_R, falseColor, d_img,
 		make_float3(eye[0], eye[1], eye[2]), make_float3(u[0], u[1], u[2]),
 		make_float3(v[0], v[1], v[2]), make_float3(w[0], w[1], w[2]));
 }
