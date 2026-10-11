@@ -198,11 +198,11 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 		int i1 = (int)floorf(xq[a] + e[a]);
 		for (int pb = xq[b] - Kb; pb <= xq[b] + Kb; pb++)
 			for (int pc = xq[c] - Kc; pc <= xq[c] + Kc; pc++) {
-				if (pb < 0) continue; if (pb >= DIM[b] - 1) continue;
-				if (pc < 0) continue; if (pc >= DIM[c] - 1) continue;
+				if (pb < 0) continue; if (pb > DIM[b] - 1) continue;//수정 2차 전처리의 D fallback 가능의 원인. 
+				if (pc < 0) continue; if (pc > DIM[c] - 1) continue;
 
 				for (int i = i0; i <= i1; i++) {
-					if (i < 0) continue; if (i + 2 > DIM[a] - 1) continue;
+					if (i < 0) continue; if (i + 1 > DIM[a] - 1) continue;
 					int q0[3], q1[3];
 					q0[a] = i;     q0[b] = pb; q0[c] = pc;
 					q1[a] = i + 1; q1[b] = pb; q1[c] = pc;
@@ -293,7 +293,7 @@ __global__ void K_Render(const unsigned char* vol, const unsigned char* bM, cons
 			}
 
 			float phi = dPhi(vol, p[0], p[1], p[2]);
-			if (phiBefore * phi < 0.0f) {
+			if (phiBefore * phi < 0.0f) {//연속값이라 이런저런 사유로..
 				float a[3] = { RS[0] + w[0] * tBefore, RS[1] + w[1] * tBefore, RS[2] + w[2] * tBefore };
 				float b[3] = { p[0], p[1], p[2] };
 				if (phiBefore > 0.0f) {
