@@ -207,7 +207,6 @@ void MyInit() {
 	auto pre2End = std::chrono::high_resolution_clock::now();
 	std::cout << "2단계 (sn=" << SIGMA_N << ", st=" << SIGMA_T_MAX << ") : "
 		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre2End - pre2Start).count() << " ms" << std::endl;
-		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre2End - pre2Start).count() << " ms" << std::endl;
 
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
