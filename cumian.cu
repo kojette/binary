@@ -246,7 +246,8 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 	B[3] = Sxy * iW - px * py;
 	B[4] = Sxz * iW - px * pz;
 	B[5] = Syz * iW - py * pz;
-	if (it < iter2 - 1) {                         // 마지막 회차가 아니면 이번 결과로 n0 갱신
+	if (it < iter2 - 1 && W > 0.0f) {
+		//if (it < iter2 - 1) {                         // 마지막 회차가 아니면 이번 결과로 n0 갱신
 		dEigSorted(B, lam, E, o);
 		n0[0] = E[0][o[2]]; n0[1] = E[1][o[2]]; n0[2] = E[2][o[2]];
 	}
@@ -393,11 +394,10 @@ void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma)
 
 // 2단계 실행 (z 한 장)
 void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
-	float sn, float stMax) {
+	float sn, float stMax, float rhoRound, int iter2) {
 	int n = VOLX * VOLY;
-	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, sn, stMax);
+	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, sn, stMax, rhoRound, iter2);
 }
-
 // 렌더 실행 (화면 전체)
 void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3]) {
