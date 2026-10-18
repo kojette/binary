@@ -50,7 +50,7 @@ const float SIGMA_T_MAX = 4.0f;         // 표면 방향 최대 폭
 
 //반복pca
 const float RHO_ROUND = 0.3f;   // 1차 λ3/λ2 가 이 이상이면 2차 1번째를 둥근 커널로
-const int   ITER2 = 2;          // 2차 PCA 횟수 (1 = 지금과 같음)
+const int   ITER2 = 4;          // 2차 PCA 횟수 (1 = 지금과 같음)
 
 // GPU 메모리
 unsigned char* d_vol = 0;   // 이진 볼륨
@@ -224,7 +224,7 @@ void MyDisplay() {
 	Render(eye);
 	static int saved = 0;                       // 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("(2차_3차)반복pca2_원형폴백추가_.bmp");
+		SaveBMP("(2차_3차)반복pca2_원형폴백추가_0.3&4.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);
