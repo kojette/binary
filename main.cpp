@@ -48,6 +48,9 @@ const float SIGMA = R_KER / 3.0f;       // 가우시안 폭 (3 sigma = R)
 const float SIGMA_N = 0.6f;             // 법선 방향 폭
 const float SIGMA_T_MAX = 4.0f;         // 표면 방향 최대 폭
 
+//반복pca
+const float RHO_ROUND = 0.3f;   // 1차 λ3/λ2 가 이 이상이면 2차 1번째를 둥근 커널로
+const int   ITER2 = 2;          // 2차 PCA 횟수 (1 = 지금과 같음)
 
 // GPU 메모리
 unsigned char* d_vol = 0;   // 이진 볼륨
@@ -59,7 +62,7 @@ unsigned char* d_img = 0;   // 렌더 결과 RGB
 // cumian.cu 의 창구 함수
 void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma);
 void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
-	float sn, float stMax);
+	float sn, float stMax, float rhoRound, int iter2);
 void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3]);
 
@@ -196,7 +199,7 @@ void MyInit() {
 	//==================== 2단계 : 타원체 PCA -> 2차 공분산 ====================
 	auto pre2Start = std::chrono::high_resolution_clock::now();
 	for (int z = 0; z < VOLZ; z++) {
-		GpuStep2(d_vol, d_A, d_B, z, SIGMA_N, SIGMA_T_MAX);
+		GpuStep2(d_vol, d_A, d_B, z, SIGMA_N, SIGMA_T_MAX, RHO_ROUND, ITER2);
 		CudaCheck(cudaGetLastError(), "2단계 실행");
 		if (z % 10 == 0) {
 			CudaCheck(cudaDeviceSynchronize(), "2단계 수행");
@@ -221,7 +224,7 @@ void MyDisplay() {
 	Render(eye);
 	static int saved = 0;                       // 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("(2차)_베이스(new)_폴백제거_인덱스범위수정_.bmp");
+		SaveBMP("(2차_3차)반복pca2_원형폴백추가_.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);

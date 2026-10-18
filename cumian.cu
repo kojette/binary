@@ -154,7 +154,7 @@ __global__ void K_Step1(const unsigned char* vol, float* covA, int z, int R, flo
 
 // 2단계 : 1차 법선 n0 로 눕힌 3시그마 타원체 안 간선 중점으로 가중 PCA -> 2차 공분산 (z 한 장)
 __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB, int z,
-	float sn, float stMax) {
+	float sn, float stMax, float rhoRound, int iter2) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
 	int x = id % VOLX, y = id / VOLX;
@@ -174,9 +174,15 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 	dEigSorted(A, lam, E, o);
 	float n0[3] = { E[0][o[2]], E[1][o[2]], E[2][o[2]] };
 
+	//반복pca
+	float rho = (lam[1] > 0.0f) ? lam[2] / lam[1] : 1.0f;   // 1차 λ3/λ2 (1에 가까울수록 1차 법선을 못 믿음)
+	for (int it = 0; it < iter2; it++) {
+
 	// 타원체 폭 : 법선 방향 sn, 표면 방향 st (문서 기준 상수)
-	float st = stMax;
-	float invSn2 = 1.0f / (sn * sn);
+		float st = stMax;
+		float snU = sn;                                   // 이번 회차 법선 방향 폭
+		if (it == 0 && rho >= rhoRound) snU = st;         // 두 폭이 같으면 타원체가 구가 됨
+		float invSn2 = 1.0f / (snU * snU);
 	float invSt2 = 1.0f / (st * st);
 
 	// 3시그마 타원체를 덮는 축정렬 상자 반폭 e_k = 3 * sqrt(Σ_kk)
@@ -184,7 +190,7 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 	int DIM[3] = { VOLX, VOLY, VOLZ };
 	float e[3];
 	for (int k = 0; k < 3; k++)
-		e[k] = 3.0f * sqrtf(st * st + (sn * sn - st * st) * n0[k] * n0[k]);
+		e[k] = 3.0f * sqrtf(st * st + (snU * snU - st * st) * n0[k] * n0[k]);
 
 	float W = 0, M[3] = { 0, 0, 0 };                            // W = Σw, M = Σw r
 	float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;  // Σw r rᵀ 6성분
@@ -240,6 +246,11 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 	B[3] = Sxy * iW - px * py;
 	B[4] = Sxz * iW - px * pz;
 	B[5] = Syz * iW - py * pz;
+	if (it < iter2 - 1) {                         // 마지막 회차가 아니면 이번 결과로 n0 갱신
+		dEigSorted(B, lam, E, o);
+		n0[0] = E[0][o[2]]; n0[1] = E[1][o[2]]; n0[2] = E[2][o[2]];
+	}
+	}   // for it 끝
 }
 
 // 실시간 : 광선 전진 -> 이진 바이섹션 교점 -> 8이웃 2차 공분산을 삼선형 가중합 (확신 없음) -> 최소 고유벡터 법선 -> 조명 (스레드 하나 = 픽셀 하나)
