@@ -406,3 +406,38 @@ void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const floa
 		make_float3(eye[0], eye[1], eye[2]), make_float3(u[0], u[1], u[2]),
 		make_float3(v[0], v[1], v[2]), make_float3(w[0], w[1], w[2]));
 }
+
+
+//==== [계측 임시] 둥근 커널이 걸리는 격자점 수 — 확인 후 이 블록 통째로 삭제 ====
+#include <stdio.h>
+__device__ unsigned int g_cnt[12];   // [0] 띠 안 격자점, [1] 둥근 커널 걸림, [2~11] ρ 구간 0.0~1.0 (0.1 간격)
+
+__global__ void K_CountRound(const float* covA, float rhoRound) {
+	int id = blockIdx.x * blockDim.x + threadIdx.x;           // 볼륨 전체 격자점 하나
+	if (id >= VOLX * VOLY * VOLZ) return;
+	const float* A = covA + id * 6;                          // 1차 공분산 (K_Step2와 같은 배열·같은 순서)
+	int nonzero = 0;
+	for (int k = 0; k < 6; k++) if (A[k] != 0.0f) nonzero = 1;
+	if (nonzero == 0) return;                                // 띠 밖 = K_Step2도 건너뜀
+	float lam[3], E[3][3]; int o[3];
+	dEigSorted(A, lam, E, o);                                // lam 큰 순서
+	float rho = (lam[1] > 0.0f) ? lam[2] / lam[1] : 1.0f;    // K_Step2 178행과 같은 식
+	atomicAdd(&g_cnt[0], 1u);
+	if (rho >= rhoRound) atomicAdd(&g_cnt[1], 1u);           // K_Step2 184행과 같은 조건
+	int b = (int)(rho * 10.0f); if (b < 0) b = 0; if (b > 9) b = 9;
+	atomicAdd(&g_cnt[2 + b], 1u);
+}
+
+void CountRound(const float* d_A, float rhoRound) {
+	unsigned int h[12] = { 0 };
+	cudaMemcpyToSymbol(g_cnt, h, sizeof(h));                 // 카운터 0으로
+	int n = VOLX * VOLY * VOLZ;
+	K_CountRound << <(n + 255) / 256, 256 >> > (d_A, rhoRound);
+	cudaDeviceSynchronize();
+	cudaMemcpyFromSymbol(h, g_cnt, sizeof(h));
+	printf("[계측] 띠 안 격자점 %u, 둥근 커널(rho >= %.2f) %u = %.2f%%\n",
+		h[0], rhoRound, h[1], h[0] ? 100.0 * h[1] / h[0] : 0.0);
+	for (int b = 0; b < 10; b++)
+		printf("  rho %.1f~%.1f : %u (%.2f%%)\n", b * 0.1, (b + 1) * 0.1, h[2 + b], h[0] ? 100.0 * h[2 + b] / h[0] : 0.0);
+}
+//==== [계측 임시] 끝 ====

@@ -50,7 +50,7 @@ const float SIGMA_T_MAX = 4.0f;         // 표면 방향 최대 폭
 
 //반복pca
 const float RHO_ROUND = 0.3f;   // 1차 λ3/λ2 가 이 이상이면 2차 1번째를 둥근 커널로
-const int   ITER2 = 4;          // 2차 PCA 횟수 (1 = 지금과 같음)
+const int   ITER2 = 3;          // 2차 PCA 횟수 (1 = 지금과 같음)
 
 // GPU 메모리
 unsigned char* d_vol = 0;   // 이진 볼륨
@@ -210,7 +210,8 @@ void MyInit() {
 	auto pre2End = std::chrono::high_resolution_clock::now();
 	std::cout << "2단계 (sn=" << SIGMA_N << ", st=" << SIGMA_T_MAX << ") : "
 		<< std::chrono::duration_cast<std::chrono::milliseconds>(pre2End - pre2Start).count() << " ms" << std::endl;
-
+	void CountRound(const float* d_A, float rhoRound);   // [계측 임시] 선언
+	CountRound(d_A, RHO_ROUND);                          // [계측 임시] 실행
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
@@ -224,7 +225,7 @@ void MyDisplay() {
 	Render(eye);
 	static int saved = 0;                       // 사진은 처음 한 번만 저장
 	if (saved == 0) {
-		SaveBMP("(2차_3차)반복pca2_원형폴백추가_0.3&4.bmp");
+		SaveBMP("(2차_3차)반복pca2_원형폴백추가_0.3&3_계측.bmp");
 		saved = 1;
 	}
 	glClear(GL_COLOR_BUFFER_BIT);
