@@ -12,8 +12,8 @@
 #include <chrono>
 #include <cuda_runtime.h>   // cudaMalloc 등 (커널은 cumian.cu)
 
-#define WINDOW_WIDTH 800
-#define WINDOW_HEIGHT 800
+#define WINDOW_WIDTH 1024
+#define WINDOW_HEIGHT 1024
 #define WIDTH   1024        // (2차_4차) 512 -> 1024 : 512 데이터 폭 전체가 화면에 들어오도록
 #define HEIGHT  1024
 const int BSIZE = 8;
@@ -30,9 +30,9 @@ const int   FILE_Z[FILE_COUNT] = { 225, 300, 552 };      // 파일 크기 ÷ (51
 //  1 bighead : 8비트라 HU 아님 -> 원래 값 120 그대로 (연조직 봉우리 88 과 뼈 봉우리 165 사이)
 //  2 abdomen : 파일값 = HU + 1024,  3 HEAD_01 : 파일값 = HU  (분석 로그 [B][E] 로 추정)
 //  뼈 문턱 +300 HU 는 관례값 (2·3 은 히스토그램에 뼈 봉우리가 없어 골짜기를 못 찾음)
-const int   FILE_ISO_HU[FILE_COUNT] = { 120, 350, 350 };
+const int   FILE_ISO_HU[FILE_COUNT] = { 120, 250, 250 };
 const int   FILE_HU_OFS[FILE_COUNT] = { 0, 1024, 0 };
-const char* OUT_NAME = "(data+)_iso_120_350_350";   // 저장 이름 : OUT_NAME_1.bmp, OUT_NAME_2.bmp, OUT_NAME_3.bmp
+const char* OUT_NAME = "(data+)_iso_120_250_250";   // 저장 이름 : OUT_NAME_1.bmp, OUT_NAME_2.bmp, OUT_NAME_3.bmp
 // 시점 (파일별) : eye = at(볼륨 중심) + EYE_OFS, 화면 위쪽 = UP, 픽셀 하나 = PIXEL 칸
 //  1 bighead : 기존 시점 그대로 (비교용)
 //  2·3       : 정면 (몸 앞 = y 작은 쪽에서 +y 로 바라봄, 머리 = z 0 쪽이 화면 위)
@@ -251,7 +251,7 @@ void MyFree() {
 void MyDisplay() {
 	glClear(GL_COLOR_BUFFER_BIT);
 	glBegin(GL_QUADS);
-	float fSize = 0.8f;
+	float fSize = 1.0f;
 	glTexCoord2f(0.0, 0.0); glVertex3f(-fSize, -fSize, 0.0);
 	glTexCoord2f(0.0, 1.0); glVertex3f(-fSize, fSize, 0.0);
 	glTexCoord2f(1.0, 1.0); glVertex3f(fSize, fSize, 0.0);
@@ -305,8 +305,8 @@ int main(int argc, char** argv) {
 		//==================== 렌더 + 저장 ====================
 		Render();
 		char outName[256]; 
-		snprintf(outName, sizeof(outName), "%s_%d.bmp", OUT_NAME, f + 1);
-		SaveBMP(outName);
+		//snprintf(outName, sizeof(outName), "%s_%d.bmp", OUT_NAME, f + 1);
+		//SaveBMP(outName); 
 
 		MyFree();
 	}
