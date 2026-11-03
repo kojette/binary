@@ -29,10 +29,10 @@ const int   FILE_Z[FILE_COUNT] = { 225, 300, 552 };      // 파일 크기 ÷ (51
 // 이진화 문턱 : 파일값 >= ISO_HU + HU_OFS 이면 안쪽
 //  1 bighead : 8비트라 HU 아님 -> 원래 값 120 그대로 (연조직 봉우리 88 과 뼈 봉우리 165 사이)
 //  2 abdomen : 파일값 = HU + 1024,  3 HEAD_01 : 파일값 = HU  (분석 로그 [B][E] 로 추정)
-//  뼈 문턱 +300 HU 는 관례값 (2·3 은 히스토그램에 뼈 봉우리가 없어 골짜기를 못 찾음)
+//  뼈 문턱 250 HU (250 / 300 / 350 비교 후 고정. 2·3 은 히스토그램에 뼈 봉우리가 없어 골짜기를 못 찾음)
 const int   FILE_ISO_HU[FILE_COUNT] = { 120, 250, 250 };
 const int   FILE_HU_OFS[FILE_COUNT] = { 0, 1024, 0 };
-const char* OUT_NAME = "(data+)_iso_120_250_250";   // 저장 이름 : OUT_NAME_1.bmp, OUT_NAME_2.bmp, OUT_NAME_3.bmp
+const char* OUT_NAME = "(base)v0_120_250_250";   // 저장 이름 : OUT_NAME_1.bmp, OUT_NAME_2.bmp, OUT_NAME_3.bmp
 // 시점 (파일별) : eye = at(볼륨 중심) + EYE_OFS, 화면 위쪽 = UP, 픽셀 하나 = PIXEL 칸
 //  1 bighead : 기존 시점 그대로 (비교용)
 //  2·3       : 정면 (몸 앞 = y 작은 쪽에서 +y 로 바라봄, 머리 = z 0 쪽이 화면 위)
@@ -61,13 +61,13 @@ using namespace std;
 // 1단계 : 등방 PCA
 const int   R_KER = 3;                  // 정육면체 창 반경
 const float SIGMA = R_KER / 3.0f;       // 가우시안 폭 (3 sigma = R)
-// 2단계 : 타원체 PCA
+// 2단계 : 타원체 PCA (1회)
 const float SIGMA_N = 0.6f;             // 법선 방향 폭
-const float SIGMA_T_MAX = 4.0f;         // 표면 방향 최대 폭
-
-//반복pca
-const float RHO_ROUND = 0.3f;   // 1차 λ3/λ2 가 이 이상이면 2차 1번째를 둥근 커널로
-const int   ITER2 = 3;          // 2차 PCA 횟수 (1 = 지금과 같음)
+const float SIGMA_T = 4.0f;             // 표면 방향 폭
+// (base) 1차 법선을 못 믿는 곳은 구 커널 쪽으로 섞기 : 섞는 비율 = smoothstep(RHO_LO, RHO_HI, 1차 λ3/λ2)
+const float SIGMA_R = 3.0f;             // 구 커널 폭 (3시그마 반경 9)
+const float RHO_LO = 0.25f;             // 1차 λ3/λ2 가 이 이하면 눕힌 타원체 그대로
+const float RHO_HI = 0.40f;             // 이 이상이면 구 커널
 
 // GPU 메모리
 unsigned char* d_vol = 0;   // 이진 볼륨
@@ -80,7 +80,7 @@ unsigned char* d_img = 0;   // 렌더 결과 RGB
 void GpuSetDim(int volx, int voly, int volz, int byCount, int bxCount);   // (2차_4차) 볼륨 크기를 GPU 상수로
 void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma);
 void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
-	float sn, float stMax, float rhoRound, int iter2);
+	float sn, float st, float sr, float rhoLo, float rhoHi);
 void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3], float pixel);
 
@@ -270,8 +270,8 @@ int main(int argc, char** argv) {
 	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
 	glEnable(GL_TEXTURE_2D);
-	printf("파라미터 : R = %d, sigma = %.2f, sn = %.2f, st = %.2f, rhoRound = %.2f, iter2 = %d\n",   // [로그]
-		R_KER, SIGMA, SIGMA_N, SIGMA_T_MAX, RHO_ROUND, ITER2);
+	printf("파라미터 : R = %d, sigma = %.2f, sn = %.2f, st = %.2f, sr = %.2f, rho %.2f ~ %.2f\n",   // [로그]
+		R_KER, SIGMA, SIGMA_N, SIGMA_T, SIGMA_R, RHO_LO, RHO_HI);
 
 	for (int f = 0; f < FILE_COUNT; f++) {
 		MyInit(f);
@@ -287,10 +287,10 @@ int main(int argc, char** argv) {
 		std::cout << "1단계 (R=" << R_KER << ") : "
 			<< std::chrono::duration_cast<std::chrono::milliseconds>(pre1End - pre1Start).count() << " ms" << std::endl;
 
-		//==================== 2단계 : 타원체 PCA -> 2차 공분산 ====================
+		//==================== 2단계 : 타원체 PCA (1회) -> 2차 공분산 ====================
 		auto pre2Start = std::chrono::high_resolution_clock::now();
 		for (int z = 0; z < VOLZ; z++) {
-			GpuStep2(d_vol, d_A, d_B, z, SIGMA_N, SIGMA_T_MAX, RHO_ROUND, ITER2);
+			GpuStep2(d_vol, d_A, d_B, z, SIGMA_N, SIGMA_T, SIGMA_R, RHO_LO, RHO_HI);
 			CudaCheck(cudaGetLastError(), "2단계 실행");
 			if (z % 10 == 0) {
 				CudaCheck(cudaDeviceSynchronize(), "2단계 수행");
@@ -299,14 +299,14 @@ int main(int argc, char** argv) {
 		}
 		CudaCheck(cudaDeviceSynchronize(), "2단계 수행");
 		auto pre2End = std::chrono::high_resolution_clock::now();
-		std::cout << "2단계 (sn=" << SIGMA_N << ", st=" << SIGMA_T_MAX << ") : "
+		std::cout << "2단계 (sn=" << SIGMA_N << ", st=" << SIGMA_T << ", sr=" << SIGMA_R << ") : "
 			<< std::chrono::duration_cast<std::chrono::milliseconds>(pre2End - pre2Start).count() << " ms" << std::endl;
 
 		//==================== 렌더 + 저장 ====================
 		Render();
-		char outName[256]; 
-		//snprintf(outName, sizeof(outName), "%s_%d.bmp", OUT_NAME, f + 1);
-		//SaveBMP(outName); 
+		char outName[256];
+		snprintf(outName, sizeof(outName), "%s_%d.bmp", OUT_NAME, f + 1);
+		SaveBMP(outName);
 
 		MyFree();
 	}

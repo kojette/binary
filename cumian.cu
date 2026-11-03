@@ -150,9 +150,10 @@ __global__ void K_Step1(const unsigned char* vol, float* covA, int z, int R, flo
 	A[5] = Syz * iW - py * pz;
 }
 
-// 2단계 : 1차 법선 n0 로 눕힌 3시그마 타원체 안 간선 중점으로 가중 PCA -> 2차 공분산 (z 한 장)
+// 2단계 : 1차 법선 n0 로 눕힌 3시그마 타원체 안 간선 중점으로 가중 PCA -> 2차 공분산 (z 한 장, 1회)
+// (base) 1차 법선을 못 믿는 곳(1차 rho 가 큰 곳)은 타원체를 구 쪽으로 섞는다 : 섞는 비율 s = smoothstep(rhoLo, rhoHi, rho)
 __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB, int z,
-	float sn, float stMax, float rhoRound, int iter2) {
+	float sn, float st, float sr, float rhoLo, float rhoHi) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
 	int x = id % VOLX, y = id / VOLX;
@@ -172,84 +173,84 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 	dEigSorted(A, lam, E, o);
 	float n0[3] = { E[0][o[2]], E[1][o[2]], E[2][o[2]] };
 
-	//반복pca
-	float rho = (lam[1] > 0.0f) ? lam[2] / lam[1] : 1.0f;   // 1차 λ3/λ2 (1에 가까울수록 1차 법선을 못 믿음)
-	for (int it = 0; it < iter2; it++) {
+	// (base) 1차 rho = λ3/λ2 (0 = 법선 방향 뚜렷, 1 = 두 방향을 구별 못 함)
+	float rho = (lam[1] > 0.0f) ? lam[2] / lam[1] : 1.0f;
 
-		// 타원체 폭 : 법선 방향 sn, 표면 방향 st (문서 기준 상수)
-		float st = stMax;
-		float snU = sn;                                   // 이번 회차 법선 방향 폭
-		if (it == 0 && rho >= rhoRound) snU = st;         // 두 폭이 같으면 타원체가 구가 됨
-		float invSn2 = 1.0f / (snU * snU);
-		float invSt2 = 1.0f / (st * st);
+	// (base) 섞는 비율 s : rho <= rhoLo 이면 0 (눕힌 타원체 그대로), rho >= rhoHi 이면 1 (구), 사이는 S자 곡선
+	float t = (rho - rhoLo) / (rhoHi - rhoLo);
+	if (t < 0.0f) t = 0.0f;
+	if (t > 1.0f) t = 1.0f;
+	float s = t * t * (3.0f - 2.0f * t);
 
-		// 3시그마 타원체를 덮는 축정렬 상자 반폭 e_k = 3 * sqrt(Σ_kk)
-		int xq[3] = { x, y, z };
-		int DIM[3] = { VOLX, VOLY, VOLZ };
-		float e[3];
-		for (int k = 0; k < 3; k++)
-			e[k] = 3.0f * sqrtf(st * st + (snU * snU - st * st) * n0[k] * n0[k]);
+	// (base) 두 폭을 각각 직선으로 섞음 : s = 0 -> (sn, st),  s = 1 -> (sr, sr) = 구
+	float snU = sn + (sr - sn) * s;   // 법선 방향 폭
+	float stU = st + (sr - st) * s;   // 표면 방향 폭
+	float invSn2 = 1.0f / (snU * snU);
+	float invSt2 = 1.0f / (stU * stU);
 
-		float W = 0, M[3] = { 0, 0, 0 };                            // W = Σw, M = Σw r
-		float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;  // Σw r rᵀ 6성분
+	// 3시그마 타원체를 덮는 축정렬 상자 반폭 e_k = 3 * sqrt(Σ_kk)
+	int xq[3] = { x, y, z };
+	int DIM[3] = { VOLX, VOLY, VOLZ };
+	float e[3];
+	for (int k = 0; k < 3; k++)
+		e[k] = 3.0f * sqrtf(stU * stU + (snU * snU - stU * stU) * n0[k] * n0[k]);
 
-		// 축 a 방향 간선 [i, i+1] 을 상자 안에서 전부 훑음
-		for (int a = 0; a < 3; a++) {
-			int b = (a + 1) % 3, c = (a + 2) % 3;
-			int Kb = (int)floorf(e[b]);
-			int Kc = (int)floorf(e[c]);
-			int i0 = (int)floorf(xq[a] - e[a]);
-			int i1 = (int)floorf(xq[a] + e[a]);
-			for (int pb = xq[b] - Kb; pb <= xq[b] + Kb; pb++)
-				for (int pc = xq[c] - Kc; pc <= xq[c] + Kc; pc++) {
-					if (pb < 0) continue; if (pb > DIM[b] - 1) continue;//수정 2차 전처리의 D fallback 가능의 원인. 
-					if (pc < 0) continue; if (pc > DIM[c] - 1) continue;
+	float W = 0, M[3] = { 0, 0, 0 };                            // W = Σw, M = Σw r
+	float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Sxz = 0, Syz = 0;  // Σw r rᵀ 6성분
 
-					for (int i = i0; i <= i1; i++) {
-						if (i < 0) continue; if (i + 1 > DIM[a] - 1) continue;
-						int q0[3], q1[3];
-						q0[a] = i;     q0[b] = pb; q0[c] = pc;
-						q1[a] = i + 1; q1[b] = pb; q1[c] = pc;
-						int v0 = dVoxel(vol, q0[0], q0[1], q0[2]);
-						int v1 = dVoxel(vol, q1[0], q1[1], q1[2]);
-						if (v0 + v1 != 1) continue;          // 0<->1 전이 간선만
+	// 축 a 방향 간선 [i, i+1] 을 상자 안에서 전부 훑음
+	for (int a = 0; a < 3; a++) {
+		int b = (a + 1) % 3, c = (a + 2) % 3;
+		int Kb = (int)floorf(e[b]);
+		int Kc = (int)floorf(e[c]);
+		int i0 = (int)floorf(xq[a] - e[a]);
+		int i1 = (int)floorf(xq[a] + e[a]);
+		for (int pb = xq[b] - Kb; pb <= xq[b] + Kb; pb++)
+			for (int pc = xq[c] - Kc; pc <= xq[c] + Kc; pc++) {
+				if (pb < 0) continue; if (pb > DIM[b] - 1) continue;
+				if (pc < 0) continue; if (pc > DIM[c] - 1) continue;
 
-						// 교점 = 간선 중점, 격자점 기준 상대좌표
-						float r[3];
-						r[0] = (float)(q0[0] - x); r[1] = (float)(q0[1] - y); r[2] = (float)(q0[2] - z);
-						r[a] += 0.5f;
+				for (int i = i0; i <= i1; i++) {
+					if (i < 0) continue; if (i + 1 > DIM[a] - 1) continue;
+					int q0[3], q1[3];
+					q0[a] = i;     q0[b] = pb; q0[c] = pc;
+					q1[a] = i + 1; q1[b] = pb; q1[c] = pc;
+					int v0 = dVoxel(vol, q0[0], q0[1], q0[2]);
+					int v1 = dVoxel(vol, q1[0], q1[1], q1[2]);
+					if (v0 + v1 != 1) continue;          // 0<->1 전이 간선만
 
-						// 마할라노비스 거리 q = (r·n0)²/sn² + (|r|² − (r·n0)²)/st²
-						float rn = r[0] * n0[0] + r[1] * n0[1] + r[2] * n0[2];
-						float r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
-						float qm = rn * rn * invSn2 + (r2 - rn * rn) * invSt2;
-						if (qm > 9.0f) continue;             // 3시그마 타원체 밖
+					// 교점 = 간선 중점, 격자점 기준 상대좌표
+					float r[3];
+					r[0] = (float)(q0[0] - x); r[1] = (float)(q0[1] - y); r[2] = (float)(q0[2] - z);
+					r[a] += 0.5f;
 
-						float wj = expf(-0.5f * qm);
-						W += wj;
-						M[0] += wj * r[0]; M[1] += wj * r[1]; M[2] += wj * r[2];
-						Sxx += wj * r[0] * r[0]; Syy += wj * r[1] * r[1]; Szz += wj * r[2] * r[2];
-						Sxy += wj * r[0] * r[1]; Sxz += wj * r[0] * r[2]; Syz += wj * r[1] * r[2];
-					}
+					// 마할라노비스 거리 q = (r·n0)²/snU² + (|r|² − (r·n0)²)/stU²
+					float rn = r[0] * n0[0] + r[1] * n0[1] + r[2] * n0[2];
+					float r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+					float qm = rn * rn * invSn2 + (r2 - rn * rn) * invSt2;
+					if (qm > 9.0f) continue;             // 3시그마 타원체 밖
+
+					float wj = expf(-0.5f * qm);
+					W += wj;
+					M[0] += wj * r[0]; M[1] += wj * r[1]; M[2] += wj * r[2];
+					Sxx += wj * r[0] * r[0]; Syy += wj * r[1] * r[1]; Szz += wj * r[2] * r[2];
+					Sxy += wj * r[0] * r[1]; Sxz += wj * r[0] * r[2]; Syz += wj * r[1] * r[2];
 				}
-		}
+			}
+	}
 
-		// 가중 공분산 C = Σw r rᵀ / W − p̄ p̄ᵀ
-		// 점이 0개(W = 0)면 NaN 이 저장됨 -> 렌더가 읽지 않는 격자점임을 계측으로 확인함
-		float iW = 1.0f / W;
-		float px = M[0] * iW, py = M[1] * iW, pz = M[2] * iW;
-		B[0] = Sxx * iW - px * px;
-		B[1] = Syy * iW - py * py;
-		B[2] = Szz * iW - pz * pz;
-		B[3] = Sxy * iW - px * py;
-		B[4] = Sxz * iW - px * pz;
-		B[5] = Syz * iW - py * pz;
-		if (it < iter2 - 1 && W > 0.0f) {
-			//if (it < iter2 - 1) {                         // 마지막 회차가 아니면 이번 결과로 n0 갱신
-			dEigSorted(B, lam, E, o);
-			n0[0] = E[0][o[2]]; n0[1] = E[1][o[2]]; n0[2] = E[2][o[2]];
-		}
-	}   // for it 끝
+	// (base) 점이 0개면 아무것도 저장하지 않음 (0 유지 = 렌더가 건너뜀). 1단계와 같은 처리
+	if (W < 1e-6f) return;
+
+	// 가중 공분산 C = Σw r rᵀ / W − p̄ p̄ᵀ
+	float iW = 1.0f / W;
+	float px = M[0] * iW, py = M[1] * iW, pz = M[2] * iW;
+	B[0] = Sxx * iW - px * px;
+	B[1] = Syy * iW - py * py;
+	B[2] = Szz * iW - pz * pz;
+	B[3] = Sxy * iW - px * py;
+	B[4] = Sxz * iW - px * pz;
+	B[5] = Syz * iW - py * pz;
 }
 
 // 실시간 : 광선 전진 -> 이진 바이섹션 교점 -> 8이웃 2차 공분산을 삼선형 가중합 (확신 없음) -> 최소 고유벡터 법선 -> 조명 (스레드 하나 = 픽셀 하나)
@@ -400,11 +401,11 @@ void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma)
 	K_Step1 << <(n + 255) / 256, 256 >> > (d_vol, d_A, z, R, sigma);
 }
 
-// 2단계 실행 (z 한 장)
+// 2단계 실행 (z 한 장, 1회)
 void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
-	float sn, float stMax, float rhoRound, int iter2) {
+	float sn, float st, float sr, float rhoLo, float rhoHi) {
 	int n = hVOLX * hVOLY;
-	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, sn, stMax, rhoRound, iter2);
+	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, sn, st, sr, rhoLo, rhoHi);
 }
 // 렌더 실행 (화면 전체)
 void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
