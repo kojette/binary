@@ -1,26 +1,15 @@
 ﻿// ============================================================================
-// exp4_main.cpp : 체크리스트 3번 - 단일 임계 vs 섞기 (일회성 실험 코드)
-//  판 6개 (모두 2차 1회, 공분산 저장, 2단계의 rho 구간만 다름)
-//    none     : 혼합 없음 (rho 2.0 ~ 3.0 -> 섞는 비율 항상 0)          = 실험1 2aniso
-//    hard0.25 ~ hard0.40 : 단일 임계 (rho T ~ T+0.0001 -> 임계 이상이면 구형 커널)
-//    blend    : 섞기 0.25 ~ 0.40                                       = 실험1 3base
-//  쌍 : 혼합 효과(none->hard0.30), 단일 vs 섞기(hard0.30->blend), 임계 흔들림(hard0.30->hard0.25, hard0.30->hard0.35)
-//  시점 : 정면만 (1번은 기존 시점). 로그 : t_run.csv, t_pair.csv, t_ref.csv
-//  커널 파일 exp_cumian.cu 그대로
-// (아래는 exp2_main 머리 주석, 참고용)
-//  기준 : exp_main.cpp (실험1). 커널 파일은 exp_cumian.cu 그대로 (수정 없음)
-//  판 4개 (쌍 = 저장 방식만 다름)
-//    2aniso        : 혼합 없는 2차 공분산 -> 공분산 렌더
-//    2aniso_normal : 위와 같은 2차 공분산 -> 법선 변환 -> 법선 렌더   (새로 추가)
-//    3base         : 혼합 2차 공분산 -> 공분산 렌더
-//    4normal       : 위와 같은 2차 공분산 -> 법선 변환 -> 법선 렌더
-//  쌍 : pS_nomix (2aniso -> 2aniso_normal), pS_mix (3base -> 4normal)
-//  확인 : 네 판 모두 실험1 사진(%d_A_%s_%s_iso%d.bmp)이 폴더에 있으면 픽셀 비교 (2aniso_normal 은 실험1에 없음)
-//  바뀐 것 (exp_main 대비)
-//    - 판 목록, 쌍 목록, 실험 B 제거
-//    - 법선 변환 전에 d_N 을 0 으로 비움 (K_ToNormal 은 0 이 아닌 격자점만 쓰므로, 비우지 않으면 앞 판 법선이 남음)
-//    - d_A 를 해제하지 않음 (3base 가 2aniso_normal 뒤에 d_A 를 다시 씀)
-//  로그 : s_run.csv, s_pair.csv, s_ref.csv
+// exp5_main.cpp : 체크리스트 4번 - 비교 방법(중앙차분, 가우시안 평활) 실험 (일회성 실험 코드)
+//  커널 파일 : exp5_cumian.cu (exp_cumian + 비교 방법 커널 3개)
+//  방법 6개. 표면(이진 바이섹션 교점)·광선·조명·시점은 모두 같고 "법선만" 다르다
+//    proposed : 제안 (2차 1회, 섞기 0.25~0.40, 공분산 저장) = 실험1 3base
+//    cd       : 이진 볼륨의 중앙차분 (실시간, 추가 메모리 0)
+//    gaussR   : 이진 볼륨을 가우시안 평활(반경 R, sigma = R/3, 프로젝트의 3시그마 반경 규칙)한 실수 볼륨의 중앙차분
+//               R = 2, 3, 4, 5. 평활 볼륨은 미리 계산해 저장 (복셀당 실수 1개)
+//  시점 : 실험1과 같음 (1번 기존 시점, 2·3번 정면 + 45도) + 실험3의 8배 확대 3곳
+//  쌍 : 각 비교 방법 -> proposed (정면 / 기존 시점만, 차이 영상 + 바뀐 픽셀)
+//  확인 : proposed 는 실험1 3base 사진과 0 픽셀이어야 함 (폴더에 있을 때)
+//  로그 : c_run.csv (방법별 전처리 ms, 렌더 ms, 저장 MB), c_pair.csv, c_ref.csv
 // ============================================================================
 #define _CRT_SECURE_NO_WARNINGS
 #include <GL/glut.h>
@@ -60,16 +49,18 @@ const int   VIEW_COUNT[FILE_COUNT] = { 1, 2, 2 };
 const char* VIEW_NAME[FILE_COUNT][2] = { { "orig", "" }, { "front", "rot45" }, { "front", "rot45" } };
 const float VIEW_DEG[2] = { 0.0f, 45.0f };
 
-// (실험4) 판 : 2단계 rho 구간 [LO, HI]. 섞는 비율 = smoothstep(LO, HI, rho)
-const int   VAR_COUNT = 6;
-const char* VAR_NAME[VAR_COUNT] = { "none", "hard0.25", "hard0.30", "hard0.35", "hard0.40", "blend" };
-const float VAR_LO[VAR_COUNT] = { 2.0f, 0.25f,   0.30f,   0.35f,   0.40f,   0.25f };
-const float VAR_HI[VAR_COUNT] = { 3.0f, 0.2501f, 0.3001f, 0.3501f, 0.4001f, 0.40f };
-const char* VAR_REF[VAR_COUNT] = { "2aniso", "", "", "", "", "3base" };   // 실험1 같은 판 (재현 확인용)
-const int   PAIR_COUNT = 4;
-const char* PAIR_NAME[PAIR_COUNT] = { "pT_mixon", "pT_hard_blend", "pT_030_025", "pT_030_035" };
-const int   PAIR_A[PAIR_COUNT] = { 0, 2, 2, 2 };
-const int   PAIR_B[PAIR_COUNT] = { 2, 5, 1, 3 };
+// (실험3) 확대 영역 : 데이터 번호(0부터), 정면 사진 픽셀 좌표 (cx, cy, 그림 뷰어 기준), 이름
+const int   ZOOM = 8;                          // 8배 : 두경부 픽셀 간격 0.6 -> 0.075 복셀 (복셀 하나 = 약 13 픽셀)
+const int   ZONE_COUNT = 3;
+const int   ZONE_DATA[ZONE_COUNT] = { 2, 2, 1 };
+const int   ZONE_CX[ZONE_COUNT] = { 625, 510, 340 };
+const int   ZONE_CY[ZONE_COUNT] = { 305, 710, 520 };
+const char* ZONE_NAME[ZONE_COUNT] = { "eye", "teeth", "spine" };
+
+// (실험5) 방법 : 0 = 제안, 1 = 중앙차분, 2~5 = 가우시안 반경 2~5
+const int   METHOD_COUNT = 6;
+const char* METHOD_NAME[METHOD_COUNT] = { "proposed", "cd", "gauss2", "gauss3", "gauss4", "gauss5" };
+const int   METHOD_R[METHOD_COUNT] = { 0, 0, 2, 3, 4, 5 };
 
 int CUR = 0;
 int VOLX, VOLY, VOLZ;
@@ -98,6 +89,8 @@ unsigned char* d_bM = 0;
 float* d_A = 0;
 float* d_B = 0;
 float* d_N = 0;
+float* d_g1 = 0;            // (실험5) 실수 볼륨 (평활 작업용 두 장)
+float* d_g2 = 0;
 unsigned char* d_img = 0;
 
 void GpuSetDim(int volx, int voly, int volz, int byCount, int bxCount);
@@ -107,6 +100,10 @@ void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
 void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3], float pixel);
 void GpuToNormal(const float* d_B, float* d_N);
+void GpuToFloat(const unsigned char* d_vol, float* d_g);
+void GpuBlur1D(const float* d_in, float* d_out, int axis, int R, float sigma);
+void GpuRenderG(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_g, unsigned char* d_img, float* d_out,
+	const float eye[3], const float u[3], const float v[3], const float w[3], float pixel);
 void GpuRenderN(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_N, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3], float pixel);
 
@@ -256,7 +253,7 @@ double Render(int view, const float* arr, int useN) {
 	int nPix = WIDTH * HEIGHT;
 	float e3[3] = { eye.x, eye.y, eye.z }, u3[3] = { u.x, u.y, u.z }, v3[3] = { v.x, v.y, v.z }, w3[3] = { w.x, w.y, w.z };
 	if (useN == 0) GpuRender(d_vol, d_bM, arr, d_img, e3, u3, v3, w3, FILE_PIXEL[CUR]);
-	else           GpuRenderN(d_vol, d_bM, arr, d_img, e3, u3, v3, w3, FILE_PIXEL[CUR]);
+	else           GpuRenderG(d_vol, d_bM, arr, d_img, 0, e3, u3, v3, w3, FILE_PIXEL[CUR]);   // (실험5) 1 = 실수 볼륨 그래디언트
 	CudaCheck(cudaGetLastError(), "렌더 실행");
 	CudaCheck(cudaDeviceSynchronize(), "렌더 수행");
 	CudaCheck(cudaMemcpy(&MyTexture[0][0][0], d_img, nPix * 3, cudaMemcpyDeviceToHost), "이미지 복사");
@@ -264,6 +261,34 @@ double Render(int view, const float* arr, int useN) {
 	double ms = std::chrono::duration<double, std::milli>(end - start).count();
 	std::cout << "렌더 : " << ms << " ms" << std::endl;
 	glTexImage2D(GL_TEXTURE_2D, 0, 3, WIDTH, HEIGHT, 0, GL_RGB, GL_UNSIGNED_BYTE, &MyTexture[0][0][0]);
+	return ms;
+}
+
+// (실험3) 확대 렌더 : 정면과 같은 방향. 눈을 화면 평면 위에서 관심 영역 중심으로 옮기고, 픽셀 간격을 1/ZOOM 로
+//  광선 시작점 = eye + u*(x-512)*pixel + v*(y-512)*pixel (커널과 같음)
+//  사진 저장은 y = 0 줄을 파일 맨 앞(= 그림 뷰어의 맨 아래)에 쓰므로, 뷰어 좌표 cy -> 렌더 y = 1023 - cy
+double RenderZoom(int cx, int cy, const float* arr, int useN) {
+	glm::vec3 at(VOLX / 2, VOLY / 2, VOLZ / 2);
+	glm::vec3 eye = at + FILE_EYE_OFS[CUR];
+	glm::vec3 up = FILE_UP[CUR];
+	glm::vec3 w = glm::normalize(at - eye);
+	glm::vec3 u = glm::normalize(glm::cross(up, w));
+	glm::vec3 v = glm::normalize(glm::cross(w, u));
+	float pixel0 = FILE_PIXEL[CUR];
+	int ry = (HEIGHT - 1) - cy;
+	eye = eye + u * ((cx - WIDTH * 0.5f) * pixel0) + v * ((ry - HEIGHT * 0.5f) * pixel0);
+	float pixel = pixel0 / ZOOM;
+
+	auto start = std::chrono::high_resolution_clock::now();
+	float e3[3] = { eye.x, eye.y, eye.z }, u3[3] = { u.x, u.y, u.z }, v3[3] = { v.x, v.y, v.z }, w3[3] = { w.x, w.y, w.z };
+	if (useN == 0) GpuRender(d_vol, d_bM, arr, d_img, e3, u3, v3, w3, pixel);
+	else           GpuRenderG(d_vol, d_bM, arr, d_img, 0, e3, u3, v3, w3, pixel);       // (실험5) 1 = 실수 볼륨 그래디언트
+	CudaCheck(cudaGetLastError(), "확대 렌더 실행");
+	CudaCheck(cudaDeviceSynchronize(), "확대 렌더 수행");
+	CudaCheck(cudaMemcpy(&MyTexture[0][0][0], d_img, WIDTH * HEIGHT * 3, cudaMemcpyDeviceToHost), "이미지 복사");
+	auto end = std::chrono::high_resolution_clock::now();
+	double ms = std::chrono::duration<double, std::milli>(end - start).count();
+	std::cout << "확대 렌더 : " << ms << " ms" << std::endl;
 	return ms;
 }
 
@@ -296,9 +321,8 @@ void MyInit(int f, int iso) {
 	CudaCheck(cudaMemset(d_A, 0, COV_BYTES), "d_A 초기화");
 	CudaCheck(cudaMalloc(&d_B, COV_BYTES), "d_B 할당");
 	CudaCheck(cudaMemset(d_B, 0, COV_BYTES), "d_B 초기화");
-	CudaCheck(cudaMalloc(&d_N, COV_BYTES / 2), "d_N 할당");
 	CudaCheck(cudaMalloc(&d_img, WIDTH * HEIGHT * 3), "d_img 할당");
-	std::cout << "GPU 메모리 : A, B 각 " << COV_BYTES / (1024 * 1024) << " MB, N " << COV_BYTES / 2 / (1024 * 1024) << " MB" << std::endl;
+	std::cout << "GPU 메모리 : A, B 각 " << COV_BYTES / (1024 * 1024) << " MB" << std::endl;
 }
 
 void MyFree() {
@@ -308,7 +332,9 @@ void MyFree() {
 	CudaCheck(cudaFree(d_B), "d_B 해제");
 	CudaCheck(cudaFree(d_N), "d_N 해제");
 	CudaCheck(cudaFree(d_img), "d_img 해제");
-	d_vol = 0; d_bM = 0; d_A = 0; d_B = 0; d_N = 0; d_img = 0;
+	CudaCheck(cudaFree(d_g1), "d_g1 해제");
+	CudaCheck(cudaFree(d_g2), "d_g2 해제");
+	d_vol = 0; d_bM = 0; d_A = 0; d_B = 0; d_N = 0; d_img = 0; d_g1 = 0; d_g2 = 0;
 	free(vol); free(bM);
 	vol = 0; bM = 0;
 }
@@ -342,18 +368,28 @@ double RunStep2(float rhoLo, float rhoHi) {
 	return ms;
 }
 
-// (실험2) 법선 변환 : d_N 을 0 으로 비운 뒤 d_B -> d_N (비우기는 시간에서 뺌)
-double RunToNormal() {
-	CudaCheck(cudaMemset(d_N, 0, COV_BYTES / 2), "d_N 초기화");
-	CudaCheck(cudaDeviceSynchronize(), "d_N 초기화 수행");
+// (실험5) 실수 볼륨 준비 : R = 0 이면 이진 볼륨 그대로(중앙차분용) -> d_g1
+//  R > 0 이면 x, y, z 순서로 한 축씩 평활 : g1 -> g2 -> g1 -> g2. 결과 배열을 돌려줌. 반환 시간 = ms
+float* PrepareG(int R, double& ms) {
 	auto s = std::chrono::high_resolution_clock::now();
-	GpuToNormal(d_B, d_N);
-	CudaCheck(cudaGetLastError(), "법선 변환 실행");
-	CudaCheck(cudaDeviceSynchronize(), "법선 변환 수행");
+	GpuToFloat(d_vol, d_g1);
+	CudaCheck(cudaGetLastError(), "실수 변환 실행");
+	float* res = d_g1;
+	if (R > 0) {
+		float sigma = R / 3.0f;
+		GpuBlur1D(d_g1, d_g2, 0, R, sigma);
+		CudaCheck(cudaGetLastError(), "평활 x 실행");
+		GpuBlur1D(d_g2, d_g1, 1, R, sigma);
+		CudaCheck(cudaGetLastError(), "평활 y 실행");
+		GpuBlur1D(d_g1, d_g2, 2, R, sigma);
+		CudaCheck(cudaGetLastError(), "평활 z 실행");
+		res = d_g2;
+	}
+	CudaCheck(cudaDeviceSynchronize(), "실수 볼륨 준비 수행");
 	auto e = std::chrono::high_resolution_clock::now();
-	double ms = std::chrono::duration<double, std::milli>(e - s).count();
-	printf("법선 변환 : %.1f ms\n", ms);
-	return ms;
+	ms = std::chrono::duration<double, std::milli>(e - s).count();
+	printf("실수 볼륨 준비 (R = %d) : %.1f ms\n", R, ms);
+	return res;
 }
 
 void MyDisplay() {
@@ -379,58 +415,86 @@ int main(int argc, char** argv) {
 	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
 	glEnable(GL_TEXTURE_2D);
 
-	FILE* fRun = fopen("t_run.csv", "w");
-	fprintf(fRun, "data,variant,view,iso,rho_lo,rho_hi,step1_ms,step2_ms,render_ms\n");
-	FILE* fPair = fopen("t_pair.csv", "w");
-	fprintf(fPair, "data,view,iso,pair,changed_px,surface_px,changed_pct,silhouette_px\n");
-	FILE* fRef = fopen("t_ref.csv", "w");
-	fprintf(fRef, "data,variant,ref_file,diff_px(-1=no file -2=size)\n");
+	FILE* fRun = fopen("c_run.csv", "w");
+	fprintf(fRun, "data,method,view,iso,pre_ms(step1+step2 or blur),render_ms,stored_MB\n");
+	FILE* fPair = fopen("c_pair.csv", "w");
+	fprintf(fPair, "data,view,iso,method_vs_proposed,changed_px,surface_px,changed_pct\n");
+	FILE* fRef = fopen("c_ref.csv", "w");
+	fprintf(fRef, "data,view,ref_file,diff_px(-1=no file -2=size)\n");
 
 	size_t nPix3 = (size_t)WIDTH * HEIGHT * 3;
-	std::vector<unsigned char> img[VAR_COUNT];
-	for (int k = 0; k < VAR_COUNT; k++) img[k].resize(nPix3);
+	std::vector<unsigned char> imgP(nPix3), imgM(nPix3);   // 제안(기존 시점/정면) 사진, 비교 방법 사진
 	char name[256];
 
 	for (int f = 0; f < FILE_COUNT; f++) {
 		int iso = A_ISO[f];
-		int vw = 0;                                   // 정면 (1번은 기존 시점)
 		MyInit(f, iso);
-		double t1 = RunStep1();
+		size_t nVox = (size_t)VOLX * VOLY * VOLZ;
 
-		for (int k = 0; k < VAR_COUNT; k++) {
-			printf("\n----- 데이터 %d, 판 %s -----\n", f + 1, VAR_NAME[k]);
-			double t2 = RunStep2(VAR_LO[k], VAR_HI[k]);
-			double tR = Render(vw, d_B, 0);
-			memcpy(img[k].data(), &MyTexture[0][0][0], nPix3);
-			snprintf(name, sizeof(name), "%d_T_%s_%s_iso%d.bmp", f + 1, VAR_NAME[k], VIEW_NAME[f][vw], iso);
-			SaveBMP(name, img[k].data());
-			fprintf(fRun, "%d,%s,%s,%d,%.4f,%.4f,%.1f,%.1f,%.1f\n", f + 1, VAR_NAME[k], VIEW_NAME[f][vw], iso, VAR_LO[k], VAR_HI[k], t1, t2, tR);
-			fflush(fRun);
-
-			if (VAR_REF[k][0] != 0) {                 // 실험1 사진과 비교 (같은 판이면 0)
-				char ref[256];
-				snprintf(ref, sizeof(ref), "%d_A_%s_%s_iso%d.bmp", f + 1, VAR_REF[k], VIEW_NAME[f][vw], iso);
-				long long dpx = CompareWithFile(ref, img[k].data());
-				printf("[재현] %s : %lld\n", ref, dpx);
-				fprintf(fRef, "%d,%s,%s,%lld\n", f + 1, VAR_NAME[k], ref, dpx);
-				fflush(fRef);
+		for (int m = 0; m < METHOD_COUNT; m++) {
+			printf("\n----- 데이터 %d, 방법 %s -----\n", f + 1, METHOD_NAME[m]);
+			double pre = 0, MB = 0;
+			const float* arr = 0;
+			int mode = 0;
+			if (m == 0) {                                       // 제안 : 1단계 + 2단계(섞기)
+				pre = RunStep1() + RunStep2(RHO_LO, RHO_HI);
+				arr = d_B; mode = 0; MB = COV_BYTES / (1024.0 * 1024.0);
 			}
-		}
+			else {
+				if (m == 1) {                                   // 제안이 끝났으니 공분산 배열 해제 후 실수 볼륨 두 장 할당
+					CudaCheck(cudaFree(d_A), "d_A 해제"); d_A = 0;
+					CudaCheck(cudaFree(d_B), "d_B 해제"); d_B = 0;
+					CudaCheck(cudaMalloc(&d_g1, nVox * sizeof(float)), "d_g1 할당");
+					CudaCheck(cudaMalloc(&d_g2, nVox * sizeof(float)), "d_g2 할당");
+				}
+				arr = PrepareG(METHOD_R[m], pre);
+				mode = 1;
+				MB = (m == 1) ? 0.0 : nVox * sizeof(float) / (1024.0 * 1024.0);   // 중앙차분은 추가 저장 없음
+			}
 
-		for (int p = 0; p < PAIR_COUNT; p++) {
-			long long changed, surf, sil;
-			snprintf(name, sizeof(name), "%d_Tdiff_%s_%s_iso%d.bmp", f + 1, PAIR_NAME[p], VIEW_NAME[f][vw], iso);
-			ComparePair(img[PAIR_A[p]].data(), img[PAIR_B[p]].data(), name, changed, surf, sil);
-			double pct = (surf > 0) ? 100.0 * changed / surf : 0;
-			printf("[쌍] 데이터 %d %s : 바뀐 픽셀 %lld / %lld (%.2f%%)\n", f + 1, PAIR_NAME[p], changed, surf, pct);
-			fprintf(fPair, "%d,%s,%d,%s,%lld,%lld,%.4f,%lld\n", f + 1, VIEW_NAME[f][vw], iso, PAIR_NAME[p], changed, surf, pct, sil);
-			fflush(fPair);
+			// 전체 시점
+			for (int vw = 0; vw < VIEW_COUNT[f]; vw++) {
+				double tR = Render(vw, arr, mode);
+				snprintf(name, sizeof(name), "%d_C_%s_%s_iso%d.bmp", f + 1, METHOD_NAME[m], VIEW_NAME[f][vw], iso);
+				SaveBMP(name, &MyTexture[0][0][0]);
+				fprintf(fRun, "%d,%s,%s,%d,%.1f,%.1f,%.1f\n", f + 1, METHOD_NAME[m], VIEW_NAME[f][vw], iso, pre, tR, MB);
+				fflush(fRun);
+
+				if (vw == 0) {
+					if (m == 0) {
+						memcpy(imgP.data(), &MyTexture[0][0][0], nPix3);
+						char ref[256];
+						snprintf(ref, sizeof(ref), "%d_A_3base_%s_iso%d.bmp", f + 1, VIEW_NAME[f][vw], iso);
+						long long dpx = CompareWithFile(ref, imgP.data());
+						printf("[재현] %s : %lld\n", ref, dpx);
+						fprintf(fRef, "%d,%s,%s,%lld\n", f + 1, VIEW_NAME[f][vw], ref, dpx);
+						fflush(fRef);
+					}
+					else {
+						memcpy(imgM.data(), &MyTexture[0][0][0], nPix3);
+						long long changed, surf, sil;
+						snprintf(name, sizeof(name), "%d_Cdiff_%s_vs_proposed_%s_iso%d.bmp", f + 1, METHOD_NAME[m], VIEW_NAME[f][vw], iso);
+						ComparePair(imgM.data(), imgP.data(), name, changed, surf, sil);
+						double pct = (surf > 0) ? 100.0 * changed / surf : 0;
+						printf("[쌍] 데이터 %d %s vs proposed : 바뀐 픽셀 %.2f%%\n", f + 1, METHOD_NAME[m], pct);
+						fprintf(fPair, "%d,%s,%d,%s,%lld,%lld,%.4f\n", f + 1, VIEW_NAME[f][vw], iso, METHOD_NAME[m], changed, surf, pct);
+						fflush(fPair);
+					}
+				}
+			}
+			// 8배 확대 (실험3과 같은 영역)
+			for (int z = 0; z < ZONE_COUNT; z++) {
+				if (ZONE_DATA[z] != f) continue;
+				RenderZoom(ZONE_CX[z], ZONE_CY[z], arr, mode);
+				snprintf(name, sizeof(name), "%d_C_%s_%s_x%d_iso%d.bmp", f + 1, METHOD_NAME[m], ZONE_NAME[z], ZOOM, iso);
+				SaveBMP(name, &MyTexture[0][0][0]);
+			}
 		}
 		MyFree();
 	}
-	 
+
 	fclose(fRun); fclose(fPair); fclose(fRef);
-	printf("\n========== 완료 : t_run.csv, t_pair.csv, t_ref.csv ==========\n");
+	printf("\n========== 완료 : c_run.csv, c_pair.csv, c_ref.csv ==========\n");
 
 	glutDisplayFunc(MyDisplay);
 	glutMainLoop();
