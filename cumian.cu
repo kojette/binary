@@ -1,4 +1,5 @@
-﻿// GPU 쪽 : 커널 함수 + main.cpp 가 부르는 창구 함수
+﻿// cumian_v1 : GPU 쪽 커널 함수 + main 이 부르는 창구 함수
+// v1 (메모리) : 1·2단계는 z 한 장짜리 버퍼에 쓰고, 렌더는 "띠 번호 표 + 띠 배열" 에서 2차 공분산을 읽음
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -97,7 +98,9 @@ __device__ void dEigSorted(const float* c, float lam[3], float E[3][3], int o[3]
 	lam[0] = l[o[0]]; lam[1] = l[o[1]]; lam[2] = l[o[2]];
 }
 
+
 // 1단계 : 격자점마다 정육면체 창 안 간선 중점으로 가우시안 가중 PCA -> 1차 공분산 (z 한 장, 스레드 하나 = 격자점 하나)
+// (v1) covA = z 한 장짜리 버퍼. 칸 번호만 장 안 번호 (y * VOLX + x), z 는 그대로 볼륨 좌표
 __global__ void K_Step1(const unsigned char* vol, float* covA, int z, int R, float sigma) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
@@ -141,7 +144,7 @@ __global__ void K_Step1(const unsigned char* vol, float* covA, int z, int R, flo
 
 	float iW = 1.0f / W;
 	float px = M[0] * iW, py = M[1] * iW, pz = M[2] * iW;
-	float* A = covA + ((z * VOLY + y) * VOLX + x) * 6;
+	float* A = covA + (y * VOLX + x) * 6;   // (v1) 장 안 칸 번호
 	A[0] = Sxx * iW - px * px;
 	A[1] = Syy * iW - py * py;
 	A[2] = Szz * iW - pz * pz;
@@ -152,12 +155,13 @@ __global__ void K_Step1(const unsigned char* vol, float* covA, int z, int R, flo
 
 // 2단계 : 1차 법선 n0 로 눕힌 3시그마 타원체 안 간선 중점으로 가중 PCA -> 2차 공분산 (z 한 장, 1회)
 // (base) 1차 법선을 못 믿는 곳(1차 rho 가 큰 곳)은 타원체를 구 쪽으로 섞는다 : 섞는 비율 s = smoothstep(rhoLo, rhoHi, rho)
+// (v1) covA, covB = z 한 장짜리 버퍼. 2단계가 1차에서 읽는 곳은 자기 격자점 하나뿐이라 한 장이면 충분
 __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB, int z,
 	float sn, float st, float sr, float rhoLo, float rhoHi) {
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= VOLX * VOLY) return;
 	int x = id % VOLX, y = id / VOLX;
-	int idx = (z * VOLY + y) * VOLX + x;
+	int idx = y * VOLX + x;   // (v1) 장 안 칸 번호
 	const float* A = covA + idx * 6;   // 1차 공분산 (읽기)
 	float* B = covB + idx * 6;         // 2차 공분산 (쓰기)
 
@@ -254,7 +258,8 @@ __global__ void K_Step2(const unsigned char* vol, const float* covA, float* covB
 }
 
 // 실시간 : 광선 전진 -> 이진 바이섹션 교점 -> 8이웃 2차 공분산을 삼선형 가중합 (확신 없음) -> 최소 고유벡터 법선 -> 조명 (스레드 하나 = 픽셀 하나)
-__global__ void K_Render(const unsigned char* vol, const unsigned char* bM, const float* covB, unsigned char* img,
+// (v1) 2차 공분산은 띠 번호 표 idx 로 찾아 띠 배열 covP 에서 읽음 (띠 밖 = -1 = 건너뜀)
+__global__ void K_Render(const unsigned char* vol, const unsigned char* bM, const int* idx, const float* covP, unsigned char* img,
 	float3 eye3, float3 u3, float3 v3, float3 w3, float supersampling) {   // (2차_4차) supersampling = 픽셀 하나가 몇 칸인지 (파일별)
 	int id = blockIdx.x * blockDim.x + threadIdx.x;
 	if (id >= WIDTH * HEIGHT) return;
@@ -324,163 +329,9 @@ __global__ void K_Render(const unsigned char* vol, const unsigned char* bM, cons
 				for (int dz = 0; dz < 2; dz++)
 					for (int dy = 0; dy < 2; dy++)
 						for (int dx = 0; dx < 2; dx++) {
-							const float* c = covB + (((iz + dz) * VOLY + (iy + dy)) * VOLX + (ix + dx)) * 6;
-							int nonzero = 0;
-							for (int k = 0; k < 6; k++)
-								if (c[k] != 0.0f) nonzero = 1;
-							if (nonzero == 0) continue;
-
-							float tri = ((dx == 1) ? fx : 1 - fx) * ((dy == 1) ? fy : 1 - fy) * ((dz == 1) ? fz : 1 - fz);
-							float tr = c[0] + c[1] + c[2];
-							if (tr <= 0.0f) continue;
-
-							float g = tri;              // v1-2 : 확신 없음, 삼선형만
-							for (int k = 0; k < 6; k++) S[k] += g * c[k];
-							wsum += g;
-						}
-
-				float N[3];
-				if (wsum > 0.0f) {
-					float lamS[3], ES[3][3];
-					int oS[3];
-					dEigSorted(S, lamS, ES, oS);
-					N[0] = ES[0][oS[2]]; N[1] = ES[1][oS[2]]; N[2] = ES[2][oS[2]];
-				}
-				else {
-					N[0] = (dDensity(vol, hit[0] + 1, hit[1], hit[2]) - dDensity(vol, hit[0] - 1, hit[1], hit[2])) * 0.5f;
-					N[1] = (dDensity(vol, hit[0], hit[1] + 1, hit[2]) - dDensity(vol, hit[0], hit[1] - 1, hit[2])) * 0.5f;
-					N[2] = (dDensity(vol, hit[0], hit[1], hit[2] + 1) - dDensity(vol, hit[0], hit[1], hit[2] - 1)) * 0.5f;
-					float len = sqrtf(N[0] * N[0] + N[1] * N[1] + N[2] * N[2]);
-					if (len > 0.0f) { N[0] /= len; N[1] /= len; N[2] /= len; }
-				}
-
-				float Vw[3] = { -w[0], -w[1], -w[2] };
-				if (N[0] * Vw[0] + N[1] * Vw[1] + N[2] * Vw[2] < 0.0f) { N[0] = -N[0]; N[1] = -N[1]; N[2] = -N[2]; }
-
-				float L[3] = { -w[0], -w[1] + 0.3f, -w[2] };
-				float lenL = sqrtf(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
-				L[0] /= lenL; L[1] /= lenL; L[2] /= lenL;
-				float H[3] = { L[0] + Vw[0], L[1] + Vw[1], L[2] + Vw[2] };
-				float lenH = sqrtf(H[0] * H[0] + H[1] * H[1] + H[2] * H[2]);
-				H[0] /= lenH; H[1] /= lenH; H[2] /= lenH;
-				float NL = fabsf(N[0] * L[0] + N[1] * L[1] + N[2] * L[2]);
-				float NH = fabsf(N[0] * H[0] + N[1] * H[1] + N[2] * H[2]);
-
-				float rgb[3] = { 0.9f, 0.85f, 0.8f };
-				float Ks[3] = { 1.2f, 0.8f, 0.8f };
-				float Ia = 0.25f, Id = 0.5f, Is = 0.9f;
-				float spec = powf(NH, 30.0f);
-				for (int k = 0; k < 3; k++) {
-					float I = Ia * rgb[k] * 0.8f + Id * rgb[k] * NL + Is * Ks[k] * spec;
-					col[k] = fminf(fmaxf(I, 0.0f), 1.0f);
-				}
-				break;
-			}
-			tBefore = t;
-			phiBefore = phi;
-		}
-	}
-	img[id * 3 + 0] = (unsigned char)(int)(col[0] * 255);
-	img[id * 3 + 1] = (unsigned char)(int)(col[1] * 255);
-	img[id * 3 + 2] = (unsigned char)(int)(col[2] * 255);
-}
-
-// (메모리) 띠 표시 : 격자점의 2차 공분산 6성분 중 하나라도 0 이 아니면 1, 전부 0 이면 0
-//         렌더가 "6성분 전부 0 이면 건너뜀" 으로 보는 조건과 똑같이 둔다 -> 결과 그림이 같아야 함
-__global__ void K_Mark(const float* covB, unsigned char* mark, int n) {
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= n) return;
-	const float* c = covB + i * 6;
-	int nonzero = 0;
-	for (int k = 0; k < 6; k++)
-		if (c[k] != 0.0f) nonzero = 1;
-	mark[i] = (unsigned char)nonzero;
-}
-
-// (메모리) 띠 모으기 : 격자점 i 가 띠 안이면 (idx[i] >= 0) 6성분을 띠 배열 idx[i] 번 칸으로 그대로 복사
-__global__ void K_Pack(const float* covB, const int* idx, float* covP, int n) {
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	if (i >= n) return;
-	int j = idx[i];
-	if (j < 0) return;
-	for (int k = 0; k < 6; k++)
-		covP[j * 6 + k] = covB[i * 6 + k];
-}
-
-// (메모리) K_Render 를 그대로 복사하고 2차 공분산을 읽는 곳만 띠 배열로 바꾼 렌더 (기존 K_Render 는 손대지 않음)
-__global__ void K_RenderBand(const unsigned char* vol, const unsigned char* bM, const int* idx, const float* covP, unsigned char* img,
-	float3 eye3, float3 u3, float3 v3, float3 w3, float supersampling) {   // (2차_4차) supersampling = 픽셀 하나가 몇 칸인지 (파일별)
-	int id = blockIdx.x * blockDim.x + threadIdx.x;
-	if (id >= WIDTH * HEIGHT) return;
-	int x = id % WIDTH, y = id / WIDTH;
-	float w[3] = { w3.x, w3.y, w3.z };
-
-	float RS[3];
-	RS[0] = eye3.x + u3.x * (x - WIDTH * 0.5f) * supersampling + v3.x * (y - HEIGHT * 0.5f) * supersampling;
-	RS[1] = eye3.y + u3.y * (x - WIDTH * 0.5f) * supersampling + v3.y * (y - HEIGHT * 0.5f) * supersampling;
-	RS[2] = eye3.z + u3.z * (x - WIDTH * 0.5f) * supersampling + v3.z * (y - HEIGHT * 0.5f) * supersampling;
-
-	float col[3] = { 0, 0, 0 };
-
-	float t1, t2;
-	t1 = -RS[0] / w[0]; t2 = ((VOLX - 1) - RS[0]) / w[0];
-	float xm = fminf(t1, t2), xM = fmaxf(t1, t2);
-	t1 = -RS[1] / w[1]; t2 = ((VOLY - 1) - RS[1]) / w[1];
-	float ym = fminf(t1, t2), yM = fmaxf(t1, t2);
-	t1 = -RS[2] / w[2]; t2 = ((VOLZ - 1) - RS[2]) / w[2];
-	float zm = fminf(t1, t2), zM = fmaxf(t1, t2);
-	float tm = fmaxf(fmaxf(xm, ym), zm);
-	float tM = fminf(fminf(xM, yM), zM);
-
-	if (tm < tM) {
-		const float step = 0.5f;
-		float tBefore = tm;
-		float phiBefore = dPhi(vol, RS[0] + w[0] * tm, RS[1] + w[1] * tm, RS[2] + w[2] * tm);
-		for (float t = tm; t < tM; t = t + step) {
-			float p[3] = { RS[0] + w[0] * t, RS[1] + w[1] * t, RS[2] + w[2] * t };
-			if (dIsOutside(p[0], p[1], p[2])) continue;
-
-			int bx = ((int)p[0]) >> BSHIFT, by = ((int)p[1]) >> BSHIFT, bz = ((int)p[2]) >> BSHIFT;
-			if (bM[(bz * BY_COUNT + by) * BX_COUNT + bx] == 0) {
-				float jump = 0;
-				int nbx, nby, nbz;
-				do {
-					jump += 1.0f;
-					nbx = ((int)(p[0] + w[0] * jump)) >> BSHIFT;
-					nby = ((int)(p[1] + w[1] * jump)) >> BSHIFT;
-					nbz = ((int)(p[2] + w[2] * jump)) >> BSHIFT;
-				} while (nbx == bx && nby == by && nbz == bz);
-				t = t + (jump - step);
-				tBefore = t;
-				phiBefore = dPhi(vol, RS[0] + w[0] * t, RS[1] + w[1] * t, RS[2] + w[2] * t);
-				continue;
-			}
-
-			float phi = dPhi(vol, p[0], p[1], p[2]);
-			// (2차_4차) 샘플이 phi = 0 에 정확히 떨어진 경우도 교점으로 (정면처럼 광선이 격자축과 나란하면 0.5 간격 샘플이 반 칸 위치에 정확히 걸려 곱이 0 이 됨)
-			if (phiBefore * phi < 0.0f || (phi == 0.0f && phiBefore != 0.0f)) {//연속값이라 이런저런 사유로..
-				float a[3] = { RS[0] + w[0] * tBefore, RS[1] + w[1] * tBefore, RS[2] + w[2] * tBefore };
-				float b[3] = { p[0], p[1], p[2] };
-				if (phiBefore > 0.0f) {
-					for (int k = 0; k < 3; k++) { float tmp = a[k]; a[k] = b[k]; b[k] = tmp; }
-				}
-				for (int it = 0; it < 10; it++) {
-					float m[3] = { (a[0] + b[0]) * 0.5f, (a[1] + b[1]) * 0.5f, (a[2] + b[2]) * 0.5f };
-					if (dPhi(vol, m[0], m[1], m[2]) < 0.0f) { a[0] = m[0]; a[1] = m[1]; a[2] = m[2]; }
-					else { b[0] = m[0]; b[1] = m[1]; b[2] = m[2]; }
-				}
-				float hit[3] = { (a[0] + b[0]) * 0.5f, (a[1] + b[1]) * 0.5f, (a[2] + b[2]) * 0.5f };
-
-				int ix = (int)hit[0], iy = (int)hit[1], iz = (int)hit[2];
-				float fx = hit[0] - ix, fy = hit[1] - iy, fz = hit[2] - iz;
-				float S[6] = { 0, 0, 0, 0, 0, 0 };
-				float wsum = 0.0f;
-				for (int dz = 0; dz < 2; dz++)
-					for (int dy = 0; dy < 2; dy++)
-						for (int dx = 0; dx < 2; dx++) {
-							// (메모리) 바뀐 곳은 이 세 줄뿐 : 격자점 번호 -> 띠 번호 -> 띠 배열에서 6성분
+							// (v1) 격자점 번호 -> 띠 번호 -> 띠 배열에서 6성분
 							int vi = ((iz + dz) * VOLY + (iy + dy)) * VOLX + (ix + dx);
-							if (idx[vi] < 0) continue;            // 띠 밖 = 기존의 "6성분 전부 0 -> 건너뜀" 과 같은 처리
+							if (idx[vi] < 0) continue;            // 띠 밖 : 건너뜀
 							const float* c = covP + idx[vi] * 6;
 							int nonzero = 0;
 							for (int k = 0; k < 6; k++)
@@ -553,41 +404,23 @@ void GpuSetDim(int volx, int voly, int volz, int byCount, int bxCount) {
 }
 
 // 1단계 실행 (z 한 장)
-void GpuStep1(const unsigned char* d_vol, float* d_A, int z, int R, float sigma) {
+void GpuStep1(const unsigned char* d_vol, float* d_Aslice, int z, int R, float sigma) {
 	int n = hVOLX * hVOLY;
-	K_Step1 << <(n + 255) / 256, 256 >> > (d_vol, d_A, z, R, sigma);
+	K_Step1 << <(n + 255) / 256, 256 >> > (d_vol, d_Aslice, z, R, sigma);
 }
 
 // 2단계 실행 (z 한 장, 1회)
-void GpuStep2(const unsigned char* d_vol, const float* d_A, float* d_B, int z,
+void GpuStep2(const unsigned char* d_vol, const float* d_Aslice, float* d_Bslice, int z,
 	float sn, float st, float sr, float rhoLo, float rhoHi) {
 	int n = hVOLX * hVOLY;
-	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_A, d_B, z, sn, st, sr, rhoLo, rhoHi);
+	K_Step2 << <(n + 255) / 256, 256 >> > (d_vol, d_Aslice, d_Bslice, z, sn, st, sr, rhoLo, rhoHi);
 }
+
 // 렌더 실행 (화면 전체)
-void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const float* d_B, unsigned char* d_img,
+void GpuRender(const unsigned char* d_vol, const unsigned char* d_bM, const int* d_idx, const float* d_P, unsigned char* d_img,
 	const float eye[3], const float u[3], const float v[3], const float w[3], float pixel) {
 	int n = WIDTH * HEIGHT;
-	K_Render << <(n + 255) / 256, 256 >> > (d_vol, d_bM, d_B, d_img,
-		make_float3(eye[0], eye[1], eye[2]), make_float3(u[0], u[1], u[2]),
-		make_float3(v[0], v[1], v[2]), make_float3(w[0], w[1], w[2]), pixel);
-}
-
-// (메모리) 띠 표시 실행 (볼륨 전체)
-void GpuMark(const float* d_B, unsigned char* d_mark, int n) {
-	K_Mark << <(n + 255) / 256, 256 >> > (d_B, d_mark, n);
-}
-
-// (메모리) 띠 모으기 실행 (볼륨 전체)
-void GpuPack(const float* d_B, const int* d_idx, float* d_P, int n) {
-	K_Pack << <(n + 255) / 256, 256 >> > (d_B, d_idx, d_P, n);
-}
-
-// (메모리) 띠 배열로 렌더 실행 (화면 전체)
-void GpuRenderBand(const unsigned char* d_vol, const unsigned char* d_bM, const int* d_idx, const float* d_P, unsigned char* d_img,
-	const float eye[3], const float u[3], const float v[3], const float w[3], float pixel) {
-	int n = WIDTH * HEIGHT;
-	K_RenderBand << <(n + 255) / 256, 256 >> > (d_vol, d_bM, d_idx, d_P, d_img,
+	K_Render << <(n + 255) / 256, 256 >> > (d_vol, d_bM, d_idx, d_P, d_img,
 		make_float3(eye[0], eye[1], eye[2]), make_float3(u[0], u[1], u[2]),
 		make_float3(v[0], v[1], v[2]), make_float3(w[0], w[1], w[2]), pixel);
 }
